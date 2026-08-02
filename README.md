@@ -1,179 +1,146 @@
 # F2My.top Stremio Addon
 
-An unofficial Stremio addon that provides streaming links scraped from https://www.f2my.top for movies and TV series.
+An unofficial Stremio addon that provides streaming links scraped from **https://www.f2my.top** - an Iranian source offering movies and TV series with Persian subtitles.
 
 ## Features
 
-- **Movies & Series Support**: Works with both movie and TV series content
-- **Automatic Slug Generation**: Converts content titles to URL-friendly slugs
-- **Fallback Search**: If direct URL lookup fails, searches the site automatically
-- **Quality Detection**: Extracts and labels video quality (1080p, 720p, 4K, etc.)
-- **Multiple Source Extraction**: Parses iframes, data attributes, inline scripts, and more
+- **Movies & Series Support**: Works with both movies and TV shows
+- **Multiple Quality Options**: Extracts 4K, 1080p, 720p, 480p streams
+- **Persian Subtitles**: All content includes Persian/Farsi subtitles
+- **IMDB Integration**: Uses IMDB IDs for content matching
+- **Season/Episode Selection**: Proper handling of series with season and episode numbers
 
 ## Installation
 
-### Prerequisites
+### Local Testing
 
-- Node.js 16+ 
-- npm or yarn
+1. **Clone or download this addon:**
+   ```bash
+   cd /workspace
+   ```
 
-### Setup
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
 
-1. Install dependencies:
+3. **Start the server:**
+   ```bash
+   npm start
+   # or
+   node server.js
+   ```
+
+4. **Install in Stremio:**
+   - Open Stremio desktop app
+   - Go to: `stremio://localhost:7000/manifest.json`
+   - Or visit in browser: http://localhost:7000/manifest.json
+
+### Deployment (Optional)
+
+Deploy to any Node.js hosting service (Heroku, Railway, Render, etc.):
 
 ```bash
-npm install
-```
-
-2. Start the server:
-
-```bash
-npm start
-```
-
-The addon will run on `http://localhost:7000` by default.
-
-### Development Mode
-
-For auto-reload during development:
-
-```bash
-npm run dev
+# Set PORT environment variable if needed
+export PORT=8080
+node server.js
 ```
 
 ## Usage
 
-### Installing in Stremio
+Once installed, the addon will automatically appear in your Stremio addons list. When you browse movies or series in Stremio:
 
-1. Start the addon server
-2. In Stremio, go to **Addons** → **Add Addon**
-3. Enter the manifest URL: `http://localhost:7000/manifest.json`
-4. Or click: [stremio://localhost:7000/manifest.json](stremio://localhost:7000/manifest.json)
+1. Select any movie or TV show
+2. The addon will search f2my.top for matching content using the IMDB ID
+3. Available streams will be displayed with quality labels
+4. For series, select the season and episode you want to watch
 
-### API Endpoints
+## Stream Format
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /manifest.json` | Addon manifest for Stremio |
-| `GET /stream/movie/{imdb_id}.json` | Get streams for a movie |
-| `GET /stream/series/{imdb_id}:{season}:{episode}.json` | Get streams for a series episode |
-| `GET /health` | Health check endpoint |
+Streams are returned with the following format:
+- **Name**: `F2My.top\n[Quality] • Iranian Source`
+- **Title**: `[Season/Episode] - [Quality]\nPersian Subtitles`
+- **URL**: Direct video link (.mkv, .mp4)
 
-### Example Requests
-
-**Movie:**
-```
-GET /stream/movie/tt15398776.json
-```
-
-**Series:**
-```
-GET /stream/series/tt1190634:1:5.json
-```
-(This requests Season 1, Episode 5 of the series)
-
-## How It Works
-
-### 1. Title to Slug Conversion
-
-When Stremio requests streams, the addon:
-- Receives the IMDB ID and content type
-- Converts the title to a URL slug (lowercase, spaces to hyphens, no special chars)
-- Example: "House of the Dragon" → "house-of-the-dragon"
-
-### 2. Page Fetching
-
-- Constructs URL: `https://www.f2my.top/movie/{slug}/` or `https://www.f2my.top/series/{slug}/`
-- Fetches the page using Axios with proper headers
-- Falls back to search if direct URL returns 404
-
-### 3. Content Scraping
-
-The addon uses Cheerio to parse HTML and extract video sources through multiple strategies:
-
-1. **Iframe Detection**: Finds embedded video players
-2. **Data Attributes**: Looks for `data-video`, `data-src`, etc.
-3. **Video Sources**: Parses `<video><source>` elements
-4. **Episode Selection**: For series, finds correct season/episode
-5. **Inline Scripts**: Extracts URLs from JavaScript code
-6. **Button/Link Elements**: Finds play/watch buttons with video links
-
-### 4. Quality Detection
-
-Quality is determined by:
-- URL patterns (e.g., `.1080p.`, `-720p-`)
-- Data attributes (`data-quality`)
-- Element text content
-- File extensions (`.m3u8` → HLS)
-
-### 5. Stream Response
-
-Returns streams in Stremio format:
+Example:
 ```json
 {
-  "streams": [
-    {
-      "name": "F2My.top\n1080p",
-      "title": "1080p Stream",
-      "url": "https://example.com/video.mp4"
-    }
-  ]
+  "name": "F2My.top\n1080p • Iranian Source",
+  "title": "S3E6 - 1080p\nPersian Subtitles",
+  "url": "https://...abrtech.top/.../House.of.the.Dragon.S03E06.1080p...mkv"
 }
 ```
 
-## Configuration
+## API Endpoints
 
-### Environment Variables
+| Endpoint | Description |
+|----------|-------------|
+| `/manifest.json` | Addon manifest for Stremio |
+| `/stream/movie/{imdbId}.json` | Movie stream request |
+| `/stream/series/{imdbId}:{season}:{episode}.json` | Series stream request |
+| `/health` | Health check endpoint |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `7000` | Server port |
+## Technical Details
 
-### Customization
+### How It Works
 
-Edit `server.js` to modify:
-- `BASE_URL`: Change the source website
-- `USER_AGENT`: Customize request headers
-- Scraping selectors in `extractVideoSources()`
+1. **Search**: When Stremio requests streams for an IMDB ID, the addon searches f2my.top
+2. **Page Parsing**: Fetches and parses the content page using Cheerio
+3. **Season/Episode Matching** (for series):
+   - Identifies season containers (`.download-season`)
+   - Parses Persian season numbers (اول, دوم, سوم, etc.)
+   - Matches episode numbers from text or URL parameters
+4. **Video Extraction**: Extracts direct video URLs from:
+   - `onclick` handlers (`handleDownloadClick('URL')`)
+   - Direct `href` attributes on download links
+   - iframe sources
+5. **Quality Detection**: Analyzes URLs and context to determine video quality
+
+### Site Structure
+
+The addon is designed to work with f2my.top's WordPress-based structure:
+- Seasons in `.download-season` containers
+- Episodes in `.series-downloaditems .d-flex` elements
+- Video URLs in onclick handlers or direct links
+- Quality information in button text or URL parameters
 
 ## Troubleshooting
 
 ### No Streams Found
 
 - The content might not be available on f2my.top
-- The site structure may have changed (update selectors)
-- Check server logs for errors
+- The IMDB ID might not match any content on the site
+- Check server logs for detailed error messages
 
-### Site Structure Changes
+### Server Not Starting
 
-If f2my.top changes their HTML structure:
-1. Inspect the page source
-2. Update selectors in `extractVideoSources()`
-3. Look for new data attributes or element patterns
+- Ensure port 7000 is not in use
+- Check that all npm packages are installed: `npm install`
+- Verify Node.js version (requires Node 14+)
 
-### Rate Limiting
+### Slow Response
 
-If you encounter rate limiting:
-- Add delays between requests
-- Use proxy rotation
-- Respect the site's terms of service
+- The addon makes HTTP requests to external sites
+- First request may be slower due to search and parsing
+- Consider deploying closer to your location
 
-## Legal Disclaimer
+## Logs
 
-This addon is for educational purposes only. The developer is not responsible for:
-- Copyright infringement
-- Terms of service violations
-- Any legal issues arising from use
+View server logs for debugging:
+```bash
+# If running in foreground, logs appear in terminal
+# If running in background:
+tail -f /tmp/server.log
+```
 
-Always respect content creators' rights and local laws.
+## Disclaimer
+
+This addon is for educational purposes only. It scrapes publicly available links from f2my.top. The addon does not host any content itself. Users should comply with their local copyright laws when streaming content.
 
 ## License
 
 MIT License - See LICENSE file for details
 
-## Contributing
+## Support
 
-Contributions welcome! Please ensure any changes:
-- Maintain code quality
-- Include appropriate comments
-- Don't break existing functionality
+For issues or questions, please check the server logs first. The addon is maintained as-is with no official support.
