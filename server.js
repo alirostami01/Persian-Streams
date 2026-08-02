@@ -194,6 +194,23 @@ function detectQuality(url, context = '') {
 }
 
 /**
+ * Check if content is dubbed based on filename/text
+ * Looks for "Dubbed", "Dooble", "دوبله" in the text
+ * @param {string} text - Text to check (filename, title, etc.)
+ * @returns {boolean} True if dubbed
+ */
+function isDubbed(text) {
+    if (!text) return false;
+    const lowerText = text.toLowerCase();
+    // Check for various dubbed indicators
+    return lowerText.includes('dubbed') || 
+           lowerText.includes('dooble') || 
+           lowerText.includes('دوبله') ||
+           lowerText.includes('farsi dub') ||
+           lowerText.includes('persian dub');
+}
+
+/**
  * Extract streams from series page for specific season/episode
  */
 function extractSeriesStreams($, targetSeason, targetEpisode) {
@@ -293,12 +310,14 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
             
             if (videoUrl) {
                 const quality = detectQuality(videoUrl, buttonText + ' ' + epText);
+                // Check if the content is dubbed based on episode text and video URL
+                const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? ' • دوبله' : '';
                 streams.push({
-                    name: `F2My.top\n${quality} • Iranian Source`,
+                    name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
                     title: `S${targetSeason}E${targetEpisode} - ${quality}\nPersian Subtitles`,
                     url: videoUrl
                 });
-                console.log(`Added stream: ${quality}`);
+                console.log(`Added stream: ${quality}${dubbedLabel}`);
             }
         });
     });
@@ -331,8 +350,10 @@ function extractMovieStreams($) {
                 }
                 
                 const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
+                // Check if the content is dubbed based on text and video URL
+                const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? ' • دوبله' : '';
                 streams.push({
-                    name: `F2My.top\n${quality} • Iranian Source`,
+                    name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
                     title: `${quality}\nPersian Subtitles`,
                     url: videoUrl
                 });
