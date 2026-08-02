@@ -3,6 +3,9 @@
  * 
  * Scrapes streaming links from https://www.f2my.top for movies and TV series.
  * This is an Iranian source providing content with Persian subtitles.
+ * 
+ * The site uses title-based URLs (e.g., /series/house-of-the-dragon/)
+ * so we fetch the title from Stremio's metadata service and convert it to a slug.
  */
 
 const express = require('express');
@@ -32,7 +35,7 @@ const builder = new addonBuilder({
     id: 'org.f2my.stremio',
     name: 'F2My.top',
     description: 'Iranian streaming source - Movies & Series with Persian Subtitles',
-    version: '1.1.0',
+    version: '1.2.0',
     resources: ['stream'],
     types: ['movie', 'series'],
     idPrefixes: ['tt'],
@@ -41,12 +44,87 @@ const builder = new addonBuilder({
 });
 
 /**
- * Search the site for content matching an IMDB ID
+ * Convert title to URL slug
+ * "House of the Dragon" -> "house-of-the-dragon"
+ * "Cape Fear (2024)" -> "cape-fear"
  */
-async function searchByImdb(imdbId) {
+function titleToSlug(title) {
+    return title
+        .toLowerCase()
+        .replace(/[^\w\s-]/g, '') // Remove special characters except spaces and hyphens
+        .trim()
+        .replace(/\s+/g, '-'); // Replace spaces with hyphens
+}
+
+/**
+ * Clean title for slug generation (remove year, special chars)
+ */
+function cleanTitleForSlug(title) {
+    // Remove year in parentheses
+    let clean = title.replace(/\s*\(\d{4}\)\s*/g, '');
+    // Remove common suffixes like "The Complete Series", etc.
+    clean = clean.replace(/\s*-\s*Complete.*$/i, '');
+    clean = clean.replace(/\s*:.*$/i, '');
+    return clean.trim();
+}
+
+/**
+ * Fetch metadata title from Stremio's meta endpoint using IMDB ID
+ */
+async function fetchTitleFromMeta(type, imdbId) {
     try {
-        const searchUrl = `/?s=${encodeURIComponent(imdbId)}`;
-        console.log(`Searching for IMDB: ${imdbId}`);
+        // Stremio meta endpoint format: https://v3-cinemeta.strem.io/meta/<type>/<imdbId>.json
+        const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
+        const response = await axios.get(metaUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 5000
+        });
+        
+        if (response.data && response.data.meta && response.data.meta.name) {
+            return response.data.meta.name;
+        }
+        return null;
+    } catch (error) {
+        console.log(`Failed to fetch metadata for ${imdbId}: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Construct the content URL based on type and title from metadata
+ */
+async function constructContentUrl(type, imdbId) {
+    // Fetch title from Stremio's metadata service
+    const title = await fetchTitleFromMeta(type, imdbId);
+    
+    if (!title) {
+        console.log(`Could not fetch title for ${imdbId}`);
+        return null;
+    }
+    
+    // Clean the title and convert to slug
+    const cleanTitle = cleanTitleForSlug(title);
+    const slug = titleToSlug(cleanTitle);
+    
+    console.log(`Original title: "${title}"`);
+    console.log(`Cleaned title: "${cleanTitle}"`);
+    console.log(`Generated slug: "${slug}"`);
+    
+    const url = `${BASE_URL}/${type === 'movie' ? 'movie' : 'series'}/${slug}/`;
+    console.log(`Constructed URL: ${url}`);
+    
+    return url;
+}
+
+/**
+ * Search the site for content as fallback
+ */
+async function searchSite(query) {
+    try {
+        const searchUrl = `/?s=${encodeURIComponent(query)}`;
+        console.log(`Searching site for: ${query}`);
         
         const response = await client.get(searchUrl);
         if (response.status !== 200) return null;
@@ -54,30 +132,17 @@ async function searchByImdb(imdbId) {
         const $ = cheerio.load(response.data);
         let foundUrl = null;
         
-        // Look for entries with IMDB link
+        // Look for series/movie links in search results
         $('a[href*="/series/"], a[href*="/movie/"]').each((_, el) => {
             const href = $(el).attr('href');
-            const parent = $(el).closest('.entry, article, .post');
-            const imdbLink = parent.find(`a[href*="imdb.com/title/${imdbId}"]`);
-            if (imdbLink.length > 0 && href) {
+            if (href && !foundUrl) {
                 foundUrl = href;
                 return false;
             }
         });
         
-        // Fallback: get first result
-        if (!foundUrl) {
-            $('a[href*="/series/"], a[href*="/movie/"]').each((_, el) => {
-                const href = $(el).attr('href');
-                if (href && !foundUrl) {
-                    foundUrl = href;
-                    return false;
-                }
-            });
-        }
-        
         if (foundUrl) {
-            console.log(`Found content URL: ${foundUrl}`);
+            console.log(`Found via search: ${foundUrl}`);
             return foundUrl;
         }
         return null;
@@ -290,26 +355,48 @@ function extractMovieStreams($) {
 }
 
 /**
- * Main stream handler
+ * Main stream handler - get streams for a given content
  */
 async function getStreams(type, imdbId, season = null, episode = null) {
     console.log('\n=== Stream Request ===');
     console.log(`Type: ${type}, IMDB: ${imdbId}, Season: ${season}, Episode: ${episode}`);
     
-    const contentUrl = await searchByImdb(imdbId);
+    // Step 1: Try to construct URL from title (fetched from Stremio metadata)
+    let contentUrl = await constructContentUrl(type, imdbId);
+    
+    // Step 2: If URL construction failed or page not found, try search fallback
+    if (!contentUrl) {
+        console.log('URL construction failed, trying search fallback...');
+        contentUrl = await searchSite(imdbId);
+    }
+    
     if (!contentUrl) {
         console.log('No content found for this IMDB ID');
         return [];
     }
     
-    const $ = await fetchPage(contentUrl);
+    // Step 3: Fetch the content page
+    let $ = await fetchPage(contentUrl);
+    
+    // Step 4: If page fetch failed (404), try search as fallback
+    if (!$) {
+        console.log('Direct page fetch failed, trying search fallback...');
+        const searchUrl = await searchSite(imdbId);
+        if (searchUrl) {
+            contentUrl = searchUrl;
+            $ = await fetchPage(contentUrl);
+        }
+    }
+    
     if (!$) {
         console.log('Failed to load content page');
         return [];
     }
     
+    // Step 5: Extract streams based on type
     let streams = [];
     if (type === 'series' && season !== null && episode !== null) {
+        console.log(`Looking for Season ${season}, Episode ${episode}`);
         streams = extractSeriesStreams($, season, episode);
     } else if (type === 'movie') {
         streams = extractMovieStreams($);
