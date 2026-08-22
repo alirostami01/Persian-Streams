@@ -1,7 +1,7 @@
 /**
- * F2My.top Stremio Addon
+ * Stremio.IR Stremio Addon
  * 
- * Scrapes streaming links from https://www.f2my.top for movies and TV series.
+ * Scrapes streaming links from Iranian web sites for movies and TV series.
  * This is an Iranian source providing content with Persian subtitles.
  * 
  * The site uses title-based URLs (e.g., /series/house-of-the-dragon/)
@@ -32,8 +32,8 @@ const client = axios.create({
 
 // Initialize addon builder with manifest
 const builder = new addonBuilder({
-  id: 'org.f2my.stremio',
-  name: 'F2My.top',
+  id: 'org.stremioir.stremio',
+  name: 'Stremio.IR',
   description: 'Iranian streaming source - Movies & Series with Persian Subtitles',
   version: '1.2.0',
   resources: ['stream'],
@@ -63,7 +63,7 @@ function cleanTitleForSlug(title) {
   // Remove year in parentheses
   let clean = title.replace(/\s*\(\d{4}\)\s*/g, '');
   // Remove common suffixes like "The Complete Series", etc.
-  clean = clean.replace(/\s*-\s*Complete.*$/i, '');
+  clean = clean.replace(/\s*-.*Complete.*$/i, '');
   clean = clean.replace(/\s*:.*$/i, '');
   return clean.trim();
 }
@@ -167,6 +167,155 @@ async function fetchPage(url) {
     console.error(`Fetch error for ${url}:`, error.message);
     return null;
   }
+}
+
+/**
+ * Extract full video quality label from filename using advanced regex
+ * Captures complete technical specification strings like:
+ * - WEB-DL 4K 2160p 10bit SDR
+ * - WEB-DL 1080p Full HD
+ * - BluRay 720p x265
+ * - HDRip 480p x264
+ * 
+ * @param {string} filename - The video filename to parse
+ * @returns {string} Full quality label or generic fallback
+ */
+function extractQualityLabel(filename) {
+  if (!filename) return 'Unknown';
+
+  const name = filename.toLowerCase();
+  let qualityParts = [];
+
+  // Extract source type (WEB-DL, BluRay, HDRip, etc.)
+  const sourcePatterns = [
+    /\b(web[\s.-]*dl|web[\s.-]*rip|web[\s.-]*hd|web[\s.-]*hdtv)\b/i,
+    /\b(bluray|blu[\s.-]*ray|bd[\s.-]*rip|br[\s.-]*rip)\b/i,
+    /\b(hd[\s.-]*rip|hdtv|dsr[\s.-]*rip|dv[\s.-]*rip)\b/i,
+    /\b(dvd[\s.-]*rip|dvd[\s.-]*r|dvd9|dvd5)\b/i,
+    /\b(cam[\s.-]*rip|cam|hdcam|ts[\s.-]*rip|telesync|tc|workprint)\b/i
+  ];
+
+  for (const pattern of sourcePatterns) {
+    const match = filename.match(pattern);
+    if (match) {
+      // Normalize the source name
+      let source = match[1].toLowerCase();
+      source = source.replace(/[\s.-]+/g, '-').toUpperCase();
+      // Special formatting
+      if (source === 'WEB-DL') qualityParts.push('WEB-DL');
+      else if (source === 'WEB-RIP') qualityParts.push('WEB-Rip');
+      else if (source === 'BLU-RAY' || source === 'BD-RIP' || source === 'BR-RIP' || source === 'BLURAY') qualityParts.push('BluRay');
+      else if (source === 'HD-RIP' || source === 'HDTV') qualityParts.push('HDRip');
+      else if (source === 'DVD-RIP' || source === 'DVD-R' || source === 'DVD9' || source === 'DVD5') qualityParts.push('DVDRip');
+      else if (['CAMRIP', 'CAM', 'HDCAM', 'TS-RIP', 'TELESYNC', 'TC', 'WORKPRINT'].includes(source)) qualityParts.push('CAM');
+      else qualityParts.push(source);
+      break;
+    }
+  }
+
+  // Extract resolution (2160p, 1080p, 720p, 480p, etc.)
+  const resolutionMatch = filename.match(/\b((?:2160|1080|720|480|360|240)[pi]?)\b/i);
+  if (resolutionMatch) {
+    let res = resolutionMatch[1].toLowerCase();
+    // Normalize to standard format
+    if (res.includes('2160')) qualityParts.push('2160p');
+    else if (res.includes('1080')) qualityParts.push('1080p');
+    else if (res.includes('720')) qualityParts.push('720p');
+    else if (res.includes('480')) qualityParts.push('480p');
+    else if (res.includes('360')) qualityParts.push('360p');
+    else if (res.includes('240')) qualityParts.push('240p');
+  }
+
+  // Check for 4K/UHD tag (separate from resolution)
+  if (/\b(4k|uhd)\b/i.test(filename) && !qualityParts.some(p => p.includes('2160'))) {
+    // Add 4K indicator if not already captured via 2160p
+    const has4kRes = qualityParts.some(p => p === '2160p');
+    if (!has4kRes) {
+      // Find position to insert 4K after source
+      const sourceIdx = qualityParts.findIndex(p => ['WEB-DL', 'WEB-Rip', 'BluRay', 'HDRip', 'DVDRip', 'CAM'].includes(p));
+      if (sourceIdx >= 0) {
+        qualityParts.splice(sourceIdx + 1, 0, '4K');
+      } else {
+        qualityParts.unshift('4K');
+      }
+    }
+  }
+
+  // Extract bit depth (8bit, 10bit, 12bit, HDR, etc.)
+  const bitDepthMatch = filename.match(/\b((?:8|10|12)[\s.-]*bit)\b/i);
+  if (bitDepthMatch) {
+    qualityParts.push(bitDepthMatch[1].replace(/[\s.-]/g, ''));
+  }
+
+  // Check for HDR variants
+  const hdrPatterns = [
+    /\b(hdr10[\s.-]*plus|hdr10\+|hdr10)\b/i,
+    /\b(dolby[\s.-]*vision|dolby[\s.-]*iq|dv)\b/i,
+    /\b(hdr)\b/i
+  ];
+  for (const pattern of hdrPatterns) {
+    const match = filename.match(pattern);
+    if (match) {
+      let hdr = match[1] || match[0];
+      hdr = hdr.replace(/[\s.-]+/g, '').toUpperCase();
+      if (hdr === 'HDR10PLUS' || hdr === 'HDR10+') hdr = 'HDR10+';
+      else if (hdr === 'DOLBYVISION' || hdr === 'DOLBYIQ' || hdr === 'DV') hdr = 'Dolby Vision';
+      qualityParts.push(hdr);
+      break; // Only take first HDR match
+    }
+  }
+
+  // Check for SDR (when explicitly mentioned, often with 4K)
+  if (/\b(sdr)\b/i.test(filename)) {
+    qualityParts.push('SDR');
+  }
+
+  // Extract codec (x264, x265, HEVC, AVC, VP9, AV1, etc.)
+  const codecPatterns = [
+    /\b(x[\s.-]*265|h[\s.-]*265|hevc)\b/i,
+    /\b(x[\s.-]*264|h[\s.-]*264|avc)\b/i,
+    /\b(vp9|vp8)\b/i,
+    /\b(av1)\b/i,
+    /\b(mpeg[\s.-]*(?:2|4)|divx|xvid)\b/i
+  ];
+  for (const pattern of codecPatterns) {
+    const match = filename.match(pattern);
+    if (match) {
+      let codec = match[1] || match[0];
+      codec = codec.replace(/[\s.-]+/g, '');
+      if (codec.toLowerCase() === 'x265' || codec.toLowerCase() === 'h265' || codec.toLowerCase() === 'hevc') {
+        qualityParts.push('x265');
+      } else if (codec.toLowerCase() === 'x264' || codec.toLowerCase() === 'h264' || codec.toLowerCase() === 'avc') {
+        qualityParts.push('x264');
+      } else {
+        qualityParts.push(codec.toUpperCase());
+      }
+      break;
+    }
+  }
+
+  // Check for Full HD tag
+  if (/\b(full[\s.-]*hd|fhd)\b/i.test(filename) && !qualityParts.some(p => p.includes('Full HD'))) {
+    qualityParts.push('Full HD');
+  }
+
+  // If we have at least resolution, return the combined label
+  if (qualityParts.length > 0) {
+    return qualityParts.join(' ');
+  }
+
+  // Fallback: try to detect just resolution number
+  const simpleResMatch = filename.match(/\b(2160|1080|720|480|360|240)p?\b/i);
+  if (simpleResMatch) {
+    const res = simpleResMatch[1];
+    if (res === '2160') return '4K';
+    if (res === '1080') return 'Full HD';
+    if (res === '720') return 'HD';
+    return res + 'p';
+  }
+
+  // Final fallback
+  return 'Unknown';
 }
 
 /**
@@ -309,12 +458,13 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       }
 
       if (videoUrl) {
-        const quality = detectQuality(videoUrl, buttonText + ' ' + epText);
+        // Extract full quality label from the video URL/filename
+        const quality = extractQualityLabel(videoUrl);
         // Check if the content is dubbed based on episode text and video URL
         const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? ' • دوبله' : '';
         streams.push({
-          name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
-          title: `S${targetSeason}E${targetEpisode} - ${quality}\nPersian Subtitles`,
+          name: `Stremio.IR\n${quality} ${dubbedLabel}`,
+          title: `S${targetSeason}E${targetEpisode} - ${quality}`,
           url: videoUrl
         });
         console.log(`Added stream: ${quality}${dubbedLabel}`);
@@ -349,12 +499,13 @@ function extractMovieStreams($) {
           if (urlMatch) videoUrl = urlMatch[1];
         }
 
-        const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
+        // Extract full quality label from the video URL/filename
+        const quality = extractQualityLabel(videoUrl);
         // Check if the content is dubbed based on text and video URL
         const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? ' • دوبله' : '';
         streams.push({
-          name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
-          title: `${quality}\nPersian Subtitles`,
+          name: `\n${quality} •${dubbedLabel}`,
+          title: `${quality}`,
           url: videoUrl
         });
       }
@@ -365,7 +516,7 @@ function extractMovieStreams($) {
     const src = $(iframe).attr('src');
     if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
       streams.push({
-        name: `F2My.top\nStream`,
+        name: `Stremio.IR\nStream`,
         title: 'Embedded Stream',
         url: src
       });
@@ -463,7 +614,7 @@ if (require.main === module) {
   serveHTTP(addonInterface, { port: PORT });
 
   console.log('\n===========================================');
-  console.log('F2My.top Stremio Addon (Iranian Source)');
+  console.log('Stremio.IR Stremio Addon (Iranian Source)');
   console.log('===========================================');
   console.log(`Server running on port ${PORT}`);
   console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
