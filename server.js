@@ -44,31 +44,6 @@ const builder = new addonBuilder({
 });
 
 /**
- * Convert title to URL slug
- * "House of the Dragon" -> "house-of-the-dragon"
- * "Cape Fear (2024)" -> "cape-fear"
- */
-function titleToSlug(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, '') // Remove special characters except spaces and hyphens
-    .trim()
-    .replace(/\s+/g, '-'); // Replace spaces with hyphens
-}
-
-/**
- * Clean title for slug generation (remove year, special chars)
- */
-function cleanTitleForSlug(title) {
-  // Remove year in parentheses
-  let clean = title.replace(/\s*\(\d{4}\)\s*/g, '');
-  // Remove common suffixes like "The Complete Series", etc.
-  clean = clean.replace(/\s*-\s*Complete.*$/i, '');
-  clean = clean.replace(/\s*:.*$/i, '');
-  return clean.trim();
-}
-
-/**
  * Fetch metadata title from Stremio's meta endpoint using IMDB ID
  */
 async function fetchTitleFromMeta(type, imdbId) {
@@ -83,7 +58,10 @@ async function fetchTitleFromMeta(type, imdbId) {
     });
 
     if (response.data && response.data.meta && response.data.meta.name) {
-      return response.data.meta.name;
+      return {
+        name: response.data.meta.name,
+        year: response.data.meta.year || null
+      };
     }
     return null;
   } catch (error) {
@@ -93,33 +71,11 @@ async function fetchTitleFromMeta(type, imdbId) {
 }
 
 /**
- * Construct the content URL based on type and title from metadata
- */
-async function constructContentUrl(type, imdbId) {
-  // Fetch title from Stremio's metadata service
-  const title = await fetchTitleFromMeta(type, imdbId);
-
-  if (!title) {
-    console.log(`Could not fetch title for ${imdbId}`);
-    return null;
-  }
-
-  // Clean the title and convert to slug
-  const cleanTitle = cleanTitleForSlug(title);
-  const slug = titleToSlug(cleanTitle);
-
-  console.log(`Original title: "${title}"`);
-  console.log(`Cleaned title: "${cleanTitle}"`);
-  console.log(`Generated slug: "${slug}"`);
-
-  const url = `${BASE_URL}/${type === 'movie' ? 'movie' : 'series'}/${slug}/`;
-  console.log(`Constructed URL: ${url}`);
-
-  return url;
-}
-
-/**
- * Search the site for content as fallback
+ * Search the site for content and return the best matching content URL.
+ *
+ * Real content URLs have the format https://www.f2my.top/<id>/<slug>/
+ * (e.g. https://www.f2my.top/76906/spider-man-brand-new-day/), so we match
+ * that pattern and rank results by how well the slug matches the query.
  */
 async function searchSite(query) {
   try {
@@ -130,24 +86,126 @@ async function searchSite(query) {
     if (response.status !== 200) return null;
 
     const $ = cheerio.load(response.data);
-    let foundUrl = null;
+    const candidates = [];
 
-    // Look for series/movie links in search results
-    $('a[href*="/series/"], a[href*="/movie/"]').each((_, el) => {
+    // Match real content pages: https://www.f2my.top/<numeric-id>/<slug>/
+    $('a').each((_, el) => {
       const href = $(el).attr('href');
-      if (href && !foundUrl) {
-        foundUrl = href;
-        return false;
+      if (!href) return;
+      const m = href.match(/f2my\.top\/(\d+)\/([^\/\?#]+)\/?$/i);
+      if (m) {
+        candidates.push({ url: href, slug: m[2].toLowerCase() });
       }
     });
 
-    if (foundUrl) {
-      console.log(`Found via search: ${foundUrl}`);
-      return foundUrl;
-    }
-    return null;
+    if (!candidates.length) return null;
+
+    // Rank candidates by how many query tokens appear in the slug
+    const tokens = query
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+
+    const scored = candidates.map(c => {
+      const score = tokens.reduce((s, t) => s + (c.slug.includes(t) ? 1 : 0), 0);
+      return { ...c, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score || b.slug.length - a.slug.length);
+
+    const best = scored[0].url;
+    console.log(`Found via search (score ${scored[0].score}): ${best}`);
+    return best;
   } catch (error) {
     console.error('Search error:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Build a URL-friendly slug from a title (lowercase, drop apostrophes/quotes,
+ * replace non-alphanumerics with hyphens). The site matches these loosely,
+ * e.g. /movie/dont-say-good-luck/ -> /84233/dont-say-good-luck-2026/.
+ */
+function slugifyTitle(title) {
+  return title
+    .toLowerCase()
+    .replace(/[''`\u2019\u2018]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
+}
+
+/**
+ * Resolve the real content URL via the site's quick-search endpoint using the
+ * IMDB id. This is the most reliable method: we query the endpoint with the
+ * IMDB code and match the returned `imdb_id` against the requested one, then
+ * take that entry's `url` (works for both movies and series).
+ *
+ * @returns {Promise<string|null>} final content URL or null
+ */
+async function resolveViaQuickSearch(imdbId) {
+  try {
+    const qsUrl = `/quick-search?q=${encodeURIComponent(imdbId)}&sort=modified_at%3Adesc`;
+    console.log(`Quick-search for IMDB ${imdbId} ...`);
+
+    const response = await client.get(qsUrl);
+    if (response.status !== 200 || !Array.isArray(response.data)) return null;
+
+    const match = response.data.find(
+      r => (r.imdb_id || '').toLowerCase() === imdbId.toLowerCase()
+    );
+
+    if (!match || !match.url) {
+      console.log('Quick-search: no IMDB match found');
+      return null;
+    }
+
+    const contentUrl = match.url.startsWith('http')
+      ? match.url
+      : `${BASE_URL}${match.url}`;
+
+    if (contentUrl.includes('/profile/')) {
+      console.log('Quick-search resolved to /profile/ (not found)');
+      return null;
+    }
+
+    console.log(`Resolved via quick-search: ${contentUrl}`);
+    return contentUrl;
+  } catch (error) {
+    console.log(`Quick-search error: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Resolve the real content URL via the site's direct endpoint.
+ *
+ * Movies:  /movie/<slug>/  302-redirects to /<id>/<slug>/  (the content page)
+ * Series:  /series/<slug>/ is itself the content page (HTTP 200)
+ *
+ * Unknown slugs redirect to /profile/, which we treat as "not found".
+ *
+ * @returns {Promise<string|null>} final content URL or null
+ */
+async function resolveViaEndpoint(title, type) {
+  try {
+    const slug = slugifyTitle(title);
+    const kind = type === 'series' ? 'series' : 'movie';
+    console.log(`Resolving via /${kind}/${slug}/ ...`);
+
+    const response = await client.get(`/${kind}/${slug}/`);
+    const finalUrl = response.request.res.responseUrl || `${BASE_URL}${response.config.url}`;
+
+    if (finalUrl && finalUrl.includes('f2my.top') && !finalUrl.includes('/profile/')) {
+      console.log(`Resolved via endpoint: ${finalUrl}`);
+      return finalUrl;
+    }
+    console.log(`Endpoint did not resolve (${finalUrl})`);
+    return null;
+  } catch (error) {
+    console.log(`Endpoint resolve error: ${error.message}`);
     return null;
   }
 }
@@ -382,13 +440,39 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   console.log('\n=== Stream Request ===');
   console.log(`Type: ${type}, IMDB: ${imdbId}, Season: ${season}, Episode: ${episode}`);
 
-  // Step 1: Try to construct URL from title (fetched from Stremio metadata)
-  let contentUrl = await constructContentUrl(type, imdbId);
+  // Resolve the metadata title (and year) from Stremio's cinemeta service.
+  const meta = await fetchTitleFromMeta(type, imdbId);
+  const title = meta ? meta.name : null;
+  const year = meta ? meta.year : null;
 
-  // Step 2: If URL construction failed or page not found, try search fallback
-  if (!contentUrl) {
-    console.log('URL construction failed, trying search fallback...');
-    contentUrl = await searchSite(imdbId);
+  let contentUrl = null;
+
+  // Step 1 (preferred): query the site's quick-search endpoint by the IMDB id
+  // and match the returned `imdb_id`. This works for both movies and series
+  // and is far more reliable than title/slug-based lookups.
+  contentUrl = await resolveViaQuickSearch(imdbId);
+
+  // Step 2: Fallback to the site's direct /movie/<slug>/ or /series/<slug>/
+  // endpoint using the title.
+  if (!contentUrl && title) {
+    contentUrl = await resolveViaEndpoint(title, type);
+  }
+
+  // Step 3: Fallback to site search using the title (and year). The site
+  // indexes titles with a curly apostrophe (Don't), so we also try a query
+  // with straight quotes normalized to curly, otherwise search returns nothing.
+  if (!contentUrl && title) {
+    const queries = [
+      title,
+      year ? `${title} ${year}` : null,
+      title.replace(/[''`]/g, '\u2019'),
+      year ? `${title.replace(/[''`]/g, '\u2019')} ${year}` : null
+    ].filter(Boolean);
+
+    for (const q of queries) {
+      contentUrl = await searchSite(q);
+      if (contentUrl) break;
+    }
   }
 
   if (!contentUrl) {
@@ -396,13 +480,13 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     return [];
   }
 
-  // Step 3: Fetch the content page
+  // Step 4: Fetch the content page
   let $ = await fetchPage(contentUrl);
 
-  // Step 4: If page fetch failed (404), try search as fallback
+  // Step 4: If page fetch failed, try search fallback once more
   if (!$) {
     console.log('Direct page fetch failed, trying search fallback...');
-    const searchUrl = await searchSite(imdbId);
+    const searchUrl = await searchSite(title || imdbId);
     if (searchUrl) {
       contentUrl = searchUrl;
       $ = await fetchPage(contentUrl);
