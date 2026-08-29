@@ -1,146 +1,219 @@
-# F2My.top Stremio Addon
+<p align="center">
+  <img src="assets/icons/player-fa.png" alt="Iranian Provider Media" width="220" />
+</p>
 
-An unofficial Stremio addon that provides streaming links scraped from **https://www.f2my.top** - an Iranian source offering movies and TV series with Persian subtitles.
+<h1 align="center">Iranian Provider Media</h1>
 
-## Features
+<p align="center">
+  افزونه غیررسمی استرمیو (Stremio) برای پخش فیلم و سریال‌های ایرانی با زیرنویس فارسی
+</p>
 
-- **Movies & Series Support**: Works with both movies and TV shows
-- **Multiple Quality Options**: Extracts 4K, 1080p, 720p, 480p streams
-- **Persian Subtitles**: All content includes Persian/Farsi subtitles
-- **IMDB Integration**: Uses IMDB IDs for content matching
-- **Season/Episode Selection**: Proper handling of series with season and episode numbers
+<p align="center">
+  <img src="https://img.shields.io/badge/Stremio-Addon-blue?style=flat-square" alt="Stremio Addon" />
+  <img src="https://img.shields.io/badge/Node.js-14%2B-green?style=flat-square" alt="Node.js" />
+  <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/badge/Persian%20Subtitles-100%25-orange?style=flat-square" alt="Persian Subtitles" />
+</p>
 
-## Installation
+---
 
-### Local Testing
+## 📖 معرفی
 
-1. **Clone or download this addon:**
-   ```bash
-   cd /workspace
-   ```
+**Iranian Provider Media** یک افزونه (Addon) غیررسمی برای [استرمیو](https://www.stremio.com/) است که لینک‌های پخش را از منابع ایرانی استخراج می‌کند. نسخه فعلی از سایت **f2my.top** (یک منبع ایرانی شامل فیلم و سریال با زیرنویس فارسی) استفاده می‌کند.
 
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+این افزونه به صورت خودکار با استفاده از شناسه IMDb محتوای درخواستی را پیدا کرده و لینک‌های مستقیم ویدیو (mkv, mp4, m3u8) را با کیفیت‌های مختلف استخراج می‌کند.
 
-3. **Start the server:**
-   ```bash
-   npm start
-   # or
-   node server.js
-   ```
+> ⚠️ این پروژه جنبه آموزشی دارد و هیچ‌گونه محتوایی را میزبانی نمی‌کند؛ صرفاً لینک‌های عمومی در دسترس را از منبع مورد نظر دریافت می‌کند.
 
-4. **Install in Stremio:**
-   - Open Stremio desktop app
-   - Go to: `stremio://localhost:7000/manifest.json`
-   - Or visit in browser: http://localhost:7000/manifest.json
+---
 
-### Deployment (Optional)
+## ✨ ویژگی‌ها
 
-Deploy to any Node.js hosting service (Heroku, Railway, Render, etc.):
+- 🎬 **پشتیبانی از فیلم و سریال**: کار با هر دو نوع محتوا (movie / series)
+- 📺 **انتخاب فصل و قسمت**: تطبیق دقیق فصل (Season) و قسمت (Episode) برای سریال‌ها
+- 🔍 **جستجوی هوشمند**: استفاده از شناسه IMDb و مطابقت با منبع
+- 🎞️ **کیفیت‌های متنوع**: تشخیص خودکار 4K، 1080p، 720p، 480p و 360p
+- 🗣️ **زیرنویس فارسی**: تمام محتوا شامل زیرنویس فارسی است
+- 🔊 **تشخیص دوبله**: شناسایی نسخه‌های دوبله‌شده (Dubbed / دوبله)
+- 🌐 **تحلیل صفحات**: پردازشگر HTML مبتنی بر Cheerio برای استخراج لینک‌ها
+
+---
+
+## 🚀 نصب و راه‌اندازی
+
+### پیش‌نیازها
+
+- [Node.js](https://nodejs.org/) نسخه ۱۴ یا بالاتر
+- یک حساب کاربری در استرمیو (برای استفاده)
+
+### ۱. دریافت کد
 
 ```bash
-# Set PORT environment variable if needed
-export PORT=8080
-node server.js
+git clone https://github.com/YOUR_USERNAME/iranian-provider-media.git
+cd iranian-provider-media
 ```
 
-## Usage
+### ۲. نصب وابستگی‌ها
 
-Once installed, the addon will automatically appear in your Stremio addons list. When you browse movies or series in Stremio:
-
-1. Select any movie or TV show
-2. The addon will search f2my.top for matching content using the IMDB ID
-3. Available streams will be displayed with quality labels
-4. For series, select the season and episode you want to watch
-
-## Stream Format
-
-Streams are returned with the following format:
-- **Name**: `F2My.top\n[Quality] • Iranian Source`
-- **Title**: `[Season/Episode] - [Quality]\nPersian Subtitles`
-- **URL**: Direct video link (.mkv, .mp4)
-
-Example:
-```json
-{
-  "name": "F2My.top\n1080p • Iranian Source",
-  "title": "S3E6 - 1080p\nPersian Subtitles",
-  "url": "https://...abrtech.top/.../House.of.the.Dragon.S03E06.1080p...mkv"
-}
-```
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `/manifest.json` | Addon manifest for Stremio |
-| `/stream/movie/{imdbId}.json` | Movie stream request |
-| `/stream/series/{imdbId}:{season}:{episode}.json` | Series stream request |
-| `/health` | Health check endpoint |
-
-## Technical Details
-
-### How It Works
-
-1. **Search**: When Stremio requests streams for an IMDB ID, the addon searches f2my.top
-2. **Page Parsing**: Fetches and parses the content page using Cheerio
-3. **Season/Episode Matching** (for series):
-   - Identifies season containers (`.download-season`)
-   - Parses Persian season numbers (اول, دوم, سوم, etc.)
-   - Matches episode numbers from text or URL parameters
-4. **Video Extraction**: Extracts direct video URLs from:
-   - `onclick` handlers (`handleDownloadClick('URL')`)
-   - Direct `href` attributes on download links
-   - iframe sources
-5. **Quality Detection**: Analyzes URLs and context to determine video quality
-
-### Site Structure
-
-The addon is designed to work with f2my.top's WordPress-based structure:
-- Seasons in `.download-season` containers
-- Episodes in `.series-downloaditems .d-flex` elements
-- Video URLs in onclick handlers or direct links
-- Quality information in button text or URL parameters
-
-## Troubleshooting
-
-### No Streams Found
-
-- The content might not be available on f2my.top
-- The IMDB ID might not match any content on the site
-- Check server logs for detailed error messages
-
-### Server Not Starting
-
-- Ensure port 7000 is not in use
-- Check that all npm packages are installed: `npm install`
-- Verify Node.js version (requires Node 14+)
-
-### Slow Response
-
-- The addon makes HTTP requests to external sites
-- First request may be slower due to search and parsing
-- Consider deploying closer to your location
-
-## Logs
-
-View server logs for debugging:
 ```bash
-# If running in foreground, logs appear in terminal
-# If running in background:
-tail -f /tmp/server.log
+npm install
 ```
 
-## Disclaimer
+### ۳. تنظیم متغیرهای محیطی
 
-This addon is for educational purposes only. It scrapes publicly available links from f2my.top. The addon does not host any content itself. Users should comply with their local copyright laws when streaming content.
+یک فایل `.env` در ریشه پروژه ایجاد کنید (نمونه در پایین آمده است):
 
-## License
+```env
+PORT=8000
+BASE_URL=https://www.f2my.top
+```
 
-MIT License - See LICENSE file for details
+| متغیر        | توضیح                                                                 |
+|--------------|-----------------------------------------------------------------------|
+| `PORT`       | پورتی که سرور روی آن اجرا می‌شود (پیش‌فرض: `8000`)                     |
+| `BASE_URL`   | آدرس منبع مورد نظر برای استخراج لینک‌ها (مثلاً `https://www.f2my.top`) |
 
-## Support
+### ۴. اجرای سرور
 
-For issues or questions, please check the server logs first. The addon is maintained as-is with no official support.
+```bash
+node addon.js
+```
+
+پس از اجرا، خروجی مشابه زیر را خواهید دید:
+
+```
+===========================================
+F2My.top Stremio Addon (Iranian Source)
+===========================================
+Server running on port 8000
+Manifest: http://localhost:8000/manifest.json
+Install: stremio://localhost:8000/manifest.json
+===========================================
+```
+
+### ۵. نصب در استرمیو
+
+- برنامه دسکتاپ استرمیو را باز کنید
+- به آدرس زیر بروید:
+  ```
+  stremio://localhost:8000/manifest.json
+  ```
+- یا در مرورگر باز کنید: `http://localhost:8000/manifest.json`
+
+---
+
+## ☁️ استقرار (Deployment)
+
+این افزونه را می‌توان روی هر سرویس میزبانی Node.js اجرا کرد (Railway، Render، Heroku، VPS شخصی و غیره).
+
+### Railway / Render
+
+1. مخزن را به سرویس متصل کنید
+2. دستور اجرا (Start Command) را روی `node addon.js` تنظیم کنید
+3. متغیرهای محیطی `PORT` و `BASE_URL` را در پنل تنظیم کنید
+
+### اجرا با PM2 (روی سرور شخصی)
+
+```bash
+npm install -g pm2
+pm2 start addon.js --name iranian-provider-media
+pm2 save
+```
+
+پس از استقرار، آدرس نصب به صورت زیر خواهد بود:
+
+```
+stremio://YOUR_DOMAIN/manifest.json
+```
+
+---
+
+## 🎯 نحوه استفاده
+
+پس از نصب، افزونه به صورت خودکار در لیست افزونه‌های استرمیو ظاهر می‌شود. وقتی فیلم یا سریالی را در استرمیو باز می‌کنید:
+
+1. یک فیلم یا سریال را انتخاب کنید
+2. افزونه با استفاده از شناسه IMDb، محتوای مطابق را در منبع جستجو می‌کند
+3. لینک‌های پخش موجود همراه با برچسب کیفیت نمایش داده می‌شوند
+4. برای سریال‌ها، فصل و قسمت مورد نظر را انتخاب کنید
+
+---
+
+## 🔌 اندپوینت‌ها (API)
+
+| اندپوینت                                                  | توضیح                                  |
+|-----------------------------------------------------------|----------------------------------------|
+| `/manifest.json`                                          | منیفست افزونه برای استرمیو            |
+| `/stream/movie/{imdbId}.json`                             | درخواست استریم فیلم                    |
+| `/stream/series/{imdbId}:{season}:{episode}.json`         | درخواست استریم قسمت سریال              |
+| `/health`                                                | بررسی سلامت سرور                       |
+
+---
+
+## ⚙️ جزئیات فنی
+
+### نحوه عملکرد
+
+1. **دریافت متادیتا**: با استفاده از شناسه IMDb، عنوان و سال ساخت از سرویس Cinemeta استرمیو دریافت می‌شود
+2. **تطبیق محتوا**: در اولویت از اندپوینت `quick-search` منبع با تطبیق `imdb_id` استفاده می‌شود (دقیق‌ترین روش)
+3. **روش‌های جایگزین**: در صورت عدم تطبیق، از مسیرهای مستقیم `/movie/<slug>/` و `/series/<slug>/` یا جستجوی سایت استفاده می‌شود
+4. **تحلیل صفحه**: صفحه محتوا با Cheerio بارگذاری و پردازش می‌شود
+5. **استخراج ویدیو**: لینک‌های مستقیم از موارد زیر استخراج می‌شوند:
+   - هندلرهای `onclick` (`handleDownloadClick('URL')`)
+   - ویژگی‌های مستقیم `href` روی لینک‌های دانلود
+   - منابع داخل `iframe`
+6. **تشخیص کیفیت**: با تحلیل آدرس و متن، کیفیت ویدیو تعیین می‌شود
+
+### ساختار منبع
+
+افزونه برای کار با ساختار وردپرس‌محور f2my.top طراحی شده است:
+
+- فصل‌ها در کانتینرهای `.download-season`
+- قسمت‌ها در المان‌های `.series-downloaditems .d-flex`
+- لینک‌های ویدیو در هندلرهای `onclick` یا لینک‌های مستقیم
+- اطلاعات کیفیت در متن دکمه‌ها یا پارامترهای آدرس
+
+### تشخیص زبان و دوبله
+
+- اعداد فارسی و انگلیسی فصل/قسمت پشتیبانی می‌شوند (اول، دوم، سوم و غیره)
+- نشانه‌های دوبله (`Dubbed`، `دوبله`، `Farsi Dub`) شناسایی می‌شوند
+
+---
+
+## 🐛 عیب‌یابی
+
+### استریمی پیدا نشد
+
+- ممکن است محتوا در منبع موجود نباشد
+- شناسه IMDb ممکن است با هیچ محتوایی تطبیق نداشته باشد
+- لاگ‌های سرور را برای جزئیات بیشتر بررسی کنید
+
+### سرور اجرا نمی‌شود
+
+- اطمینان حاصل کنید که پورت انتخابی در استفاده نیست
+- وابستگی‌ها را نصب کنید: `npm install`
+- نسخه Node.js را چک کنید (نیاز به ۱۴+)
+
+### پاسخ‌دهی کند
+
+- افزونه درخواست‌های HTTP به سایت‌های خارجی ارسال می‌کند
+- اولین درخواست به دلیل جستجو و پردازش ممکن است کندتر باشد
+- استقرار سرور در نزدیکی موقعیت مکانی خود را در نظر بگیرید
+
+---
+
+## 📄 سلب مسئولیت (Disclaimer)
+
+این افزونه صرفاً برای اهداف آموزشی ایجاد شده است و لینک‌های عمومی در دسترس را از منبع مورد نظر استخراج می‌کند. افزونه هیچ محتوایی را میزبانی نمی‌کند. کاربران موظف هستند با قوانین کپی‌رایت محلی خود هنگام پخش محتوا مطابقت داشته باشند.
+
+---
+
+## 📜 مجوز
+
+این پروژه تحت مجوز MIT منتشر شده است. جزئیات بیشتر در فایل `LICENSE`.
+
+---
+
+<p align="center">
+  ساخته شده با ❤️ برای جامعه استرمیو فارسی‌زبان
+</p>

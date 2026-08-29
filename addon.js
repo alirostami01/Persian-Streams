@@ -12,9 +12,10 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { addonBuilder } = require('stremio-addon-sdk');
+require('dotenv').config();
 
 const PORT = process.env.PORT || 8000;
-const BASE_URL = 'https://www.f2my.top';
+const BASE_URL = process.env.BASE_URL;
 
 // Create axios instance with proper headers
 const client = axios.create({
