@@ -227,7 +227,6 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       const $epEl = $(epEl);
       const epLink = $epEl.find('a.btn-block.btn-default').first();
       const epText = epLink.text().trim();
-      console.log(epLink.text());
       let epNum = epIdx + 1;
 
       const persianEpMatch = epText.match(/(?:قسمت)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
