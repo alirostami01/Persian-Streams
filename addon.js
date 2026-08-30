@@ -207,7 +207,17 @@ function extractLabeledValue(text, labels) {
     'فصل', 'قسمت', 'Season', 'Episode',
     'دانلود', 'Download',
     'زیرنویس', 'Subtitle',
-    'صوت', 'Audio'
+    'صوت', 'Audio',
+    'میانگین', 'امتیاز', 'IMDb', 'IMDB', 'Rating', 'Rate',
+    'ژانر', 'Genre',
+    'سال', 'Year',
+    'کشور', 'Country',
+    'کارگردان', 'Director',
+    'بازیگران', 'Actors', 'Cast',
+    'رده', 'Age',
+    'وضعیت', 'Status',
+    'شبکه', 'Network',
+    'خلاصه', 'Story', 'Plot'
   ];
 
   const normalizedText = String(text)
@@ -275,9 +285,8 @@ function extractReleaseInfoNearElement($, element, maxDepth = 4) {
   return { quality: null, encoder: null };
 }
 
-function buildStreamName(quality, encoder, dubbedLabel = '') {
-  const encoderLabel = encoder ? ` • encoder: ${encoder}` : '';
-  return `${quality}${encoderLabel}${dubbedLabel}`.trim();
+function buildStreamName(quality, dubbedLabel = '') {
+  return `${quality}${dubbedLabel}`.trim();
 }
 
 /**
@@ -400,7 +409,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
         const encoder = releaseInfo.encoder;
         // Check if the content is dubbed based on episode text and video URL
         const dubbedLabel = isDubbed(`${$epEl.text()} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, encoder, dubbedLabel);
+        const streamName = buildStreamName(quality, dubbedLabel);
         const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
 
         streams.push({
@@ -448,7 +457,7 @@ function extractMovieStreams($) {
         const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
         // Check if the content is dubbed based on text and video URL
         const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, encoder, dubbedLabel);
+        const streamName = buildStreamName(quality, dubbedLabel);
         const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
 
         streams.push({
