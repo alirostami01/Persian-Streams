@@ -1,14 +1,16 @@
 /**
- * F2My.top Stremio Addon
+ * Persian Streams - Stremio Addon
  * 
- * Scrapes streaming links from https://www.f2my.top for movies and TV series.
- * This is an Iranian source providing content with Persian subtitles.
+ * Scrapes streaming links from the source configured via BASE_URL (in .env)
+ * for movies and TV series. This is an Iranian source providing content with
+ * Persian subtitles.
  * 
  * The site uses title-based URLs (e.g., /series/house-of-the-dragon/)
  * so we fetch the title from Stremio's metadata service and convert it to a slug.
  */
 
 const express = require('express');
+const path = require('path');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { addonBuilder } = require('stremio-addon-sdk');
@@ -16,6 +18,26 @@ require('dotenv').config();
 
 const PORT = process.env.PORT || 8000;
 const BASE_URL = process.env.BASE_URL;
+
+if (!BASE_URL) {
+  console.error('BASE_URL is not set. Please define it in your .env file (e.g. BASE_URL=https://www.example.com)');
+  process.exit(1);
+}
+
+// let BASE_HOST = '';
+// try {
+//   BASE_HOST = new URL(BASE_URL).host;
+// } catch (e) {
+//   console.error(`Invalid BASE_URL: ${BASE_URL}`);
+//   process.exit(1);
+// }
+//
+// const Persian_Streams = 'Persian_Streams';
+
+// Regex that matches real content pages on the configured provider,
+// e.g. https://<host>/<numeric-id>/<slug>/
+// const escapedHost = BASE_HOST.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// const contentUrlRegex = new RegExp(`${escapedHost}\\/(\\d+)\\/([^\\/\\?#]+)\\/?$`, 'i');
 
 // Create axios instance with proper headers
 const client = axios.create({
@@ -31,17 +53,23 @@ const client = axios.create({
   validateStatus: status => status < 500
 });
 
+// Logo is served as a static file by the HTTP server (see serveHTTP static
+// option below), so it is referenced by a URL instead of being embedded.
+const LOGO = '/assets/icons/logo.png';
+
 // Initialize addon builder with manifest
 const builder = new addonBuilder({
-  id: 'org.f2my.stremio',
-  name: 'F2My.top',
-  description: 'Iranian streaming source - Movies & Series with Persian Subtitles',
+  id: 'org.alirostami.streams.persian',
+  name: 'Persian Streams',
+  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/iranian-provider-media',
   version: '1.2.0',
   resources: ['stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
   catalogs: [],
-  logo: 'https://www.f2my.top/favicon.ico'
+  contactEmail: 'rostami.ali@gmail.com',
+  author: 'Ali Rostami rostami.ali@gmail.com',
+  logo: LOGO
 });
 
 /**
@@ -74,70 +102,70 @@ async function fetchTitleFromMeta(type, imdbId) {
 /**
  * Search the site for content and return the best matching content URL.
  *
- * Real content URLs have the format https://www.f2my.top/<id>/<slug>/
- * (e.g. https://www.f2my.top/76906/spider-man-brand-new-day/), so we match
+ * Real content URLs have the format https://<host>/<id>/<slug>/
+ * (e.g. https://www.example.com/76906/spider-man-brand-new-day/), so we match
  * that pattern and rank results by how well the slug matches the query.
  */
-async function searchSite(query) {
-  try {
-    const searchUrl = `/?s=${encodeURIComponent(query)}`;
-    console.log(`Searching site for: ${query}`);
-
-    const response = await client.get(searchUrl);
-    if (response.status !== 200) return null;
-
-    const $ = cheerio.load(response.data);
-    const candidates = [];
-
-    // Match real content pages: https://www.f2my.top/<numeric-id>/<slug>/
-    $('a').each((_, el) => {
-      const href = $(el).attr('href');
-      if (!href) return;
-      const m = href.match(/f2my\.top\/(\d+)\/([^\/\?#]+)\/?$/i);
-      if (m) {
-        candidates.push({ url: href, slug: m[2].toLowerCase() });
-      }
-    });
-
-    if (!candidates.length) return null;
-
-    // Rank candidates by how many query tokens appear in the slug
-    const tokens = query
-      .toLowerCase()
-      .replace(/[^\w\s-]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean);
-
-    const scored = candidates.map(c => {
-      const score = tokens.reduce((s, t) => s + (c.slug.includes(t) ? 1 : 0), 0);
-      return { ...c, score };
-    });
-
-    scored.sort((a, b) => b.score - a.score || b.slug.length - a.slug.length);
-
-    const best = scored[0].url;
-    console.log(`Found via search (score ${scored[0].score}): ${best}`);
-    return best;
-  } catch (error) {
-    console.error('Search error:', error.message);
-    return null;
-  }
-}
-
+// async function searchSite(query) {
+//   try {
+//     const searchUrl = `/?s=${encodeURIComponent(query)}`;
+//     console.log(`Searching site for: ${query}`);
+//
+//     const response = await client.get(searchUrl);
+//     if (response.status !== 200) return null;
+//
+//     const $ = cheerio.load(response.data);
+//     const candidates = [];
+//
+//     // Match real content pages: https://<host>/<numeric-id>/<slug>/
+//     $('a').each((_, el) => {
+//       const href = $(el).attr('href');
+//       if (!href) return;
+//       const m = href.match(contentUrlRegex);
+//       if (m) {
+//         candidates.push({ url: href, slug: m[2].toLowerCase() });
+//       }
+//     });
+//
+//     if (!candidates.length) return null;
+//
+//     // Rank candidates by how many query tokens appear in the slug
+//     const tokens = query
+//       .toLowerCase()
+//       .replace(/[^\w\s-]/g, ' ')
+//       .split(/\s+/)
+//       .filter(Boolean);
+//
+//     const scored = candidates.map(c => {
+//       const score = tokens.reduce((s, t) => s + (c.slug.includes(t) ? 1 : 0), 0);
+//       return { ...c, score };
+//     });
+//
+//     scored.sort((a, b) => b.score - a.score || b.slug.length - a.slug.length);
+//
+//     const best = scored[0].url;
+//     console.log(`Found via search (score ${scored[0].score}): ${best}`);
+//     return best;
+//   } catch (error) {
+//     console.error('Search error:', error.message);
+//     return null;
+//   }
+// }
+//
 /**
  * Build a URL-friendly slug from a title (lowercase, drop apostrophes/quotes,
  * replace non-alphanumerics with hyphens). The site matches these loosely,
  * e.g. /movie/dont-say-good-luck/ -> /84233/dont-say-good-luck-2026/.
  */
-function slugifyTitle(title) {
-  return title
-    .toLowerCase()
-    .replace(/[''`\u2019\u2018]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-{2,}/g, '-');
-}
-
+// function slugifyTitle(title) {
+//   return title
+//     .toLowerCase()
+//     .replace(/[''`\u2019\u2018]/g, '')
+//     .replace(/[^a-z0-9]+/g, '-')
+//     .replace(/^-+|-+$/g, '')
+//     .replace(/-{2,}/g, '-');
+// }
+//
 /**
  * Resolve the real content URL via the site's quick-search endpoint using the
  * IMDB id. This is the most reliable method: we query the endpoint with the
@@ -190,27 +218,27 @@ async function resolveViaQuickSearch(imdbId) {
  *
  * @returns {Promise<string|null>} final content URL or null
  */
-async function resolveViaEndpoint(title, type) {
-  try {
-    const slug = slugifyTitle(title);
-    const kind = type === 'series' ? 'series' : 'movie';
-    console.log(`Resolving via /${kind}/${slug}/ ...`);
-
-    const response = await client.get(`/${kind}/${slug}/`);
-    const finalUrl = response.request.res.responseUrl || `${BASE_URL}${response.config.url}`;
-
-    if (finalUrl && finalUrl.includes('f2my.top') && !finalUrl.includes('/profile/')) {
-      console.log(`Resolved via endpoint: ${finalUrl}`);
-      return finalUrl;
-    }
-    console.log(`Endpoint did not resolve (${finalUrl})`);
-    return null;
-  } catch (error) {
-    console.log(`Endpoint resolve error: ${error.message}`);
-    return null;
-  }
-}
-
+// async function resolveViaEndpoint(title, type) {
+//   try {
+//     const slug = slugifyTitle(title);
+//     const kind = type === 'series' ? 'series' : 'movie';
+//     console.log(`Resolving via /${kind}/${slug}/ ...`);
+//
+//     const response = await client.get(`/${kind}/${slug}/`);
+//     const finalUrl = response.request.res.responseUrl || `${BASE_URL}${response.config.url}`;
+//
+//     if (finalUrl && finalUrl.includes(BASE_HOST) && !finalUrl.includes('/profile/')) {
+//       console.log(`Resolved via endpoint: ${finalUrl}`);
+//       return finalUrl;
+//     }
+//     console.log(`Endpoint did not resolve (${finalUrl})`);
+//     return null;
+//   } catch (error) {
+//     console.log(`Endpoint resolve error: ${error.message}`);
+//     return null;
+//   }
+// }
+//
 /**
  * Fetch and parse a page
  */
@@ -276,7 +304,6 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
   const streams = [];
   const targetEpNum = parseInt(targetEpisode, 10);
 
-  console.log(`Looking for Season ${targetSeason}, Episode ${targetEpisode}`);
 
   $('.download-season').each((seasonIdx, seasonEl) => {
     const $seasonEl = $(seasonEl);
@@ -372,8 +399,8 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
         // Check if the content is dubbed based on episode text and video URL
         const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? ' • دوبله' : '';
         streams.push({
-          name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
-          title: `S${targetSeason}E${targetEpisode} - ${quality}\nPersian Subtitles`,
+          name: `${quality} ${dubbedLabel}`,
+          title: `S${targetSeason}E${targetEpisode} - ${quality}`,
           url: videoUrl
         });
         console.log(`Added stream: ${quality}${dubbedLabel}`);
@@ -412,8 +439,8 @@ function extractMovieStreams($) {
         // Check if the content is dubbed based on text and video URL
         const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? ' • دوبله' : '';
         streams.push({
-          name: `F2My.top\n${quality} • Iranian Source${dubbedLabel}`,
-          title: `${quality}\nPersian Subtitles`,
+          name: `${quality} ${dubbedLabel}`,
+          title: `${quality}`,
           url: videoUrl
         });
       }
@@ -424,7 +451,7 @@ function extractMovieStreams($) {
     const src = $(iframe).attr('src');
     if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
       streams.push({
-        name: `F2My.top\nStream`,
+        name: `Stream`,
         title: 'Embedded Stream',
         url: src
       });
@@ -455,50 +482,50 @@ async function getStreams(type, imdbId, season = null, episode = null) {
 
   // Step 2: Fallback to the site's direct /movie/<slug>/ or /series/<slug>/
   // endpoint using the title.
-  if (!contentUrl && title) {
-    contentUrl = await resolveViaEndpoint(title, type);
-  }
+  // if (!contentUrl && title) {
+  //   contentUrl = await resolveViaEndpoint(title, type);
+  // }
 
   // Step 3: Fallback to site search using the title (and year). The site
   // indexes titles with a curly apostrophe (Don't), so we also try a query
   // with straight quotes normalized to curly, otherwise search returns nothing.
-  if (!contentUrl && title) {
-    const queries = [
-      title,
-      year ? `${title} ${year}` : null,
-      title.replace(/[''`]/g, '\u2019'),
-      year ? `${title.replace(/[''`]/g, '\u2019')} ${year}` : null
-    ].filter(Boolean);
-
-    for (const q of queries) {
-      contentUrl = await searchSite(q);
-      if (contentUrl) break;
-    }
-  }
-
-  if (!contentUrl) {
-    console.log('No content found for this IMDB ID');
-    return [];
-  }
+  // if (!contentUrl && title) {
+  //   const queries = [
+  //     title,
+  //     year ? `${title} ${year}` : null,
+  //     title.replace(/[''`]/g, '\u2019'),
+  //     year ? `${title.replace(/[''`]/g, '\u2019')} ${year}` : null
+  //   ].filter(Boolean);
+  //
+  //   for (const q of queries) {
+  //     contentUrl = await searchSite(q);
+  //     if (contentUrl) break;
+  //   }
+  // }
+  //
+  // if (!contentUrl) {
+  //   console.log('No content found for this IMDB ID');
+  //   return [];
+  // }
 
   // Step 4: Fetch the content page
   let $ = await fetchPage(contentUrl);
 
   // Step 4: If page fetch failed, try search fallback once more
-  if (!$) {
-    console.log('Direct page fetch failed, trying search fallback...');
-    const searchUrl = await searchSite(title || imdbId);
-    if (searchUrl) {
-      contentUrl = searchUrl;
-      $ = await fetchPage(contentUrl);
-    }
-  }
-
-  if (!$) {
-    console.log('Failed to load content page');
-    return [];
-  }
-
+  // if (!$) {
+  //   console.log('Direct page fetch failed, trying search fallback...');
+  //   const searchUrl = await searchSite(title || imdbId);
+  //   if (searchUrl) {
+  //     contentUrl = searchUrl;
+  //     $ = await fetchPage(contentUrl);
+  //   }
+  // }
+  //
+  // if (!$) {
+  //   console.log('Failed to load content page');
+  //   return [];
+  // }
+  //
   // Step 5: Extract streams based on type
   let streams = [];
   if (type === 'series' && season !== null && episode !== null) {
@@ -524,9 +551,9 @@ builder.defineStreamHandler((args) => {
     imdbId = parts[0];
     season = parts[1] ? parseInt(parts[1], 10) : null;
     episode = parts[2] ? parseInt(parts[2], 10) : null;
-    console.log(`Series request: ${imdbId}, S${season}E${episode}`);
+    console.log(`\nSeries request: ${imdbId}, S${season}E${episode}`);
   } else {
-    console.log(`Movie request: ${imdbId}`);
+    console.log(`\nMovie request: ${imdbId}`);
   }
 
   return getStreams(type, imdbId, season, episode)
@@ -542,16 +569,47 @@ module.exports = builder.getInterface();
 
 // Start server if run directly
 if (require.main === module) {
-  const { serveHTTP } = require('stremio-addon-sdk');
+  const { getRouter } = require('stremio-addon-sdk');
   const addonInterface = builder.getInterface();
 
-  serveHTTP(addonInterface, { port: PORT });
+  const app = express();
 
-  console.log('\n===========================================');
-  console.log('F2My.top Stremio Addon (Iranian Source)');
-  console.log('===========================================');
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
-  console.log(`Install: stremio://localhost:${PORT}/manifest.json`);
-  console.log('===========================================\n');
+  // Override the manifest route to inject an absolute logo URL.
+  // Stremio requires absolute URLs for images in the manifest.
+  app.get('/manifest.json', (req, res) => {
+    const protocol = req.protocol || 'http';
+    const host = req.get('host') || `localhost:${PORT}`;
+    const manifestWithLogo = {
+      ...addonInterface.manifest,
+      logo: `${protocol}://${host}/assets/icons/logo.png`
+    };
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(manifestWithLogo));
+  });
+
+  app.use(getRouter(addonInterface));
+
+  // Serve the addon logo and other assets from the same origin so the manifest
+  // can reference them by a relative URL (Stremio manifest size limit is 8kb).
+  app.use('/assets/icons', express.static(path.join(__dirname, 'assets', 'icons')));
+
+  app.get('/', (_, res) => {
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end(
+      `<h1>${addonInterface.manifest.name}</h1>` +
+      `<p>${addonInterface.manifest.description}</p>` +
+      `<p>${addonInterface.manifest.author}</p>` +
+      `<p>Install: <a href="stremio://localhost:${PORT}/manifest.json">stremio://localhost:${PORT}/manifest.json</a></p>`
+    );
+  });
+
+  app.listen(PORT, () => {
+    console.log('\n===========================================');
+    console.log(`${addonInterface.manifest.name} Stremio Addon (Iranian Source)`);
+    console.log('===========================================');
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
+    console.log(`Install: stremio://localhost:${PORT}/manifest.json`);
+    console.log('===========================================\n');
+  });
 }
