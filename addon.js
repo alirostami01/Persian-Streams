@@ -144,7 +144,8 @@ async function fetchPage(url) {
 }
 
 /**
- * Detect video quality from URL and text
+ * Detect video quality from URL and text as a fallback when the source page
+ * does not expose a dedicated quality label.
  */
 function detectQuality(url, context = '') {
   const combined = (url + ' ' + context).toLowerCase();
@@ -165,6 +166,118 @@ function detectQuality(url, context = '') {
   }
 
   return 'Unknown';
+}
+
+/**
+ * Convert labels like `کیفیت : WEB-DL 4K 2160p 10bit HDR` to the clean
+ * value that should be shown in Stremio (`WEB-DL 4K 2160p 10bit HDR`).
+ */
+function cleanMetadataValue(value) {
+  if (!value) return null;
+
+  const cleaned = String(value)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/^[\s:：؛;،,|\-–—]+/, '')
+    .replace(/[\s|\-–—]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+/**
+ * Extract the value that comes after one of the given labels.
+ *
+ * Examples:
+ *   کیفیت : WEB-DL 4K 2160p 10bit HDR  -> WEB-DL 4K 2160p 10bit HDR
+ *   انکودر : PSA                       -> PSA
+ */
+function extractLabeledValue(text, labels) {
+  if (!text) return null;
+
+  const boundaryLabels = [
+    'کیفیت', 'Quality',
+    'انکودر', 'Encoder', 'Encode',
+    'حجم', 'Size',
+    'زبان', 'Language',
+    'فرمت', 'Format',
+    'رزولوشن', 'Resolution',
+    'مدت', 'زمان', 'Duration',
+    'فصل', 'قسمت', 'Season', 'Episode',
+    'دانلود', 'Download',
+    'زیرنویس', 'Subtitle',
+    'صوت', 'Audio'
+  ];
+
+  const normalizedText = String(text)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/\r/g, '\n');
+  const lowerText = normalizedText.toLowerCase();
+
+  for (const label of labels) {
+    const labelIndex = lowerText.indexOf(label.toLowerCase());
+    if (labelIndex === -1) continue;
+
+    let valueStart = labelIndex + label.length;
+    while (valueStart < normalizedText.length && /[\s:：؛]/.test(normalizedText[valueStart])) {
+      valueStart += 1;
+    }
+
+    let valueEnd = normalizedText.length;
+    const lineEnd = normalizedText.indexOf('\n', valueStart);
+    if (lineEnd !== -1) valueEnd = Math.min(valueEnd, lineEnd);
+
+    for (const boundaryLabel of boundaryLabels) {
+      const boundaryIndex = lowerText.indexOf(boundaryLabel.toLowerCase(), valueStart);
+      if (boundaryIndex !== -1 && boundaryIndex < valueEnd) {
+        valueEnd = boundaryIndex;
+      }
+    }
+
+    const value = cleanMetadataValue(normalizedText.slice(valueStart, valueEnd));
+    if (value) return value;
+  }
+
+  return null;
+}
+
+/**
+ * Extract source-provided release labels from an HTML fragment. This preserves
+ * the exact quality line from the provider instead of reducing it to only
+ * `1080p`/`720p`, and also exposes encoder information when present.
+ */
+function extractReleaseInfoFromElement($, element) {
+  if (!element) return { quality: null, encoder: null };
+
+  const text = $(element).text();
+
+  return {
+    quality: extractLabeledValue(text, ['کیفیت', 'Quality']),
+    encoder: extractLabeledValue(text, ['انکودر', 'Encoder', 'Encode'])
+  };
+}
+
+/**
+ * Try the current node first, then walk up a few parents. This handles pages
+ * where quality/encoder labels are placed on a wrapper around the download row.
+ */
+function extractReleaseInfoNearElement($, element, maxDepth = 4) {
+  let current = $(element);
+
+  for (let depth = 0; depth <= maxDepth && current.length > 0; depth += 1) {
+    const info = extractReleaseInfoFromElement($, current[0]);
+    if (info.quality || info.encoder) return info;
+    current = current.parent();
+  }
+
+  return { quality: null, encoder: null };
+}
+
+function buildStreamName(quality, encoder, dubbedLabel = '') {
+  const encoderLabel = encoder ? ` • encoder: ${encoder}` : '';
+  return `${quality}${encoderLabel}${dubbedLabel}`.trim();
 }
 
 /**
@@ -281,15 +394,21 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       }
 
       if (videoUrl) {
-        const quality = detectQuality(videoUrl, buttonText + ' ' + epText);
+        const releaseInfo = extractReleaseInfoNearElement($, epEl);
+        const fallbackContext = `${buttonText} ${$epEl.text()} ${videoUrl}`;
+        const quality = releaseInfo.quality || detectQuality(videoUrl, fallbackContext);
+        const encoder = releaseInfo.encoder;
         // Check if the content is dubbed based on episode text and video URL
-        const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? ' • دوبله' : '';
+        const dubbedLabel = isDubbed(`${$epEl.text()} ${videoUrl}`) ? ' • دوبله' : '';
+        const streamName = buildStreamName(quality, encoder, dubbedLabel);
+        const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+
         streams.push({
-          name: `${quality} ${dubbedLabel}`,
-          title: `S${targetSeason}E${targetEpisode} - ${quality}`,
+          name: streamName,
+          title: `S${targetSeason}E${targetEpisode} - ${quality}${encoderTitle}`,
           url: videoUrl
         });
-        console.log(`Added stream: ${quality}${dubbedLabel}`);
+        console.log(`Added stream: ${streamName}`);
       }
     });
   });
@@ -321,12 +440,20 @@ function extractMovieStreams($) {
           if (urlMatch) videoUrl = urlMatch[1];
         }
 
-        const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
+        const releaseElement = $(el).closest('.d-flex, li, .download-item, .download-list, .download-box, .dl-box');
+        const releaseInfo = extractReleaseInfoNearElement($, releaseElement[0] || box);
+        const boxReleaseInfo = extractReleaseInfoFromElement($, box);
+        const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
+        const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
+        const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
         // Check if the content is dubbed based on text and video URL
-        const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? ' • دوبله' : '';
+        const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
+        const streamName = buildStreamName(quality, encoder, dubbedLabel);
+        const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+
         streams.push({
-          name: `${quality} ${dubbedLabel}`,
-          title: `${quality}`,
+          name: streamName,
+          title: `${quality}${encoderTitle}`,
           url: videoUrl
         });
       }
