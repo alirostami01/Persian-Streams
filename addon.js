@@ -206,7 +206,12 @@ function extractLabeledValue(text, labels) {
     'مدت', 'زمان', 'Duration',
     'فصل', 'قسمت', 'Season', 'Episode',
     'دانلود', 'Download',
-    'زیرنویس', 'Subtitle',
+    'بدون زیرنویس فارسی', 'بدون زیرنویس', 'زیرنویس فارسی', 'زیرنویس',
+    'No Persian Subtitles', 'No Persian Subtitle', 'Without Persian Subtitles', 'Without Persian Subtitle',
+    'No Farsi Subtitles', 'No Farsi Subtitle', 'Without Farsi Subtitles', 'Without Farsi Subtitle',
+    'No Subtitles', 'No Subtitle', 'Without Subtitles', 'Without Subtitle',
+    'Persian Subtitles', 'Persian Subtitle', 'Farsi Subtitles', 'Farsi Subtitle',
+    'Subtitles', 'Subtitle',
     'صوت', 'Audio',
     'میانگین', 'امتیاز', 'IMDb', 'IMDB', 'Rating', 'Rate',
     'ژانر', 'Genre',
@@ -258,35 +263,93 @@ function extractLabeledValue(text, labels) {
  * the exact quality line from the provider instead of reducing it to only
  * `1080p`/`720p`, and also exposes encoder information when present.
  */
+function detectPersianSubtitleStatus(text) {
+  if (!text) return null;
+
+  const normalizedText = String(text)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const negativePatterns = [
+    /بدون\s+زیر\s*نویس/,
+    /فاقد\s+زیر\s*نویس/,
+    /زیر\s*نویس\s*(?:فارسی)?\s*[:：؛]?\s*(?:ندارد|موجود\s+نیست|اضافه\s+نشده)/,
+    /no\s+(?:persian\s+|farsi\s+)?sub(?:title)?s?/,
+    /without\s+(?:persian\s+|farsi\s+)?sub(?:title)?s?/
+  ];
+
+  if (negativePatterns.some(pattern => pattern.test(normalizedText))) {
+    return 'none';
+  }
+
+  const positivePatterns = [
+    /زیر\s*نویس\s+فارسی/,
+    /زیر\s*نویس\s*(?:فارسی)?\s*[:：؛]?\s*(?:دارد|موجود)/,
+    /با\s+زیر\s*نویس/,
+    /دارای\s+زیر\s*نویس/,
+    /زیر\s*نویس\s+چسبیده/,
+    /persian\s+sub(?:title)?s?/,
+    /farsi\s+sub(?:title)?s?/,
+    /hard\s*sub(?:bed)?/,
+    /hardcoded\s+sub(?:title)?s?/,
+    /\bsubbed\b/
+  ];
+
+  if (positivePatterns.some(pattern => pattern.test(normalizedText))) {
+    return 'persian';
+  }
+
+  return null;
+}
+
+function formatSubtitleLabel(status) {
+  if (status === 'persian') return 'زیرنویس فارسی';
+  if (status === 'none') return 'بدون زیرنویس فارسی';
+  return null;
+}
+
 function extractReleaseInfoFromElement($, element) {
-  if (!element) return { quality: null, encoder: null };
+  if (!element) return { quality: null, encoder: null, subtitleStatus: null };
 
   const text = $(element).text();
 
   return {
     quality: extractLabeledValue(text, ['کیفیت', 'Quality']),
-    encoder: extractLabeledValue(text, ['انکودر', 'Encoder', 'Encode'])
+    encoder: extractLabeledValue(text, ['انکودر', 'Encoder', 'Encode']),
+    subtitleStatus: detectPersianSubtitleStatus(text)
   };
 }
 
 /**
  * Try the current node first, then walk up a few parents. This handles pages
- * where quality/encoder labels are placed on a wrapper around the download row.
+ * where quality/encoder/subtitle labels are placed on a wrapper around the
+ * download row. Fields are merged independently so finding quality in the row
+ * does not prevent reading subtitle information from a parent wrapper.
  */
 function extractReleaseInfoNearElement($, element, maxDepth = 4) {
+  const result = { quality: null, encoder: null, subtitleStatus: null };
   let current = $(element);
 
   for (let depth = 0; depth <= maxDepth && current.length > 0; depth += 1) {
     const info = extractReleaseInfoFromElement($, current[0]);
-    if (info.quality || info.encoder) return info;
+    result.quality = result.quality || info.quality;
+    result.encoder = result.encoder || info.encoder;
+    result.subtitleStatus = result.subtitleStatus || info.subtitleStatus;
+
+    if (result.quality && result.encoder && result.subtitleStatus) break;
     current = current.parent();
   }
 
-  return { quality: null, encoder: null };
+  return result;
 }
 
-function buildStreamName(quality, dubbedLabel = '') {
-  return `${quality}${dubbedLabel}`.trim();
+function buildStreamName(quality, dubbedLabel = '', subtitleStatus = null) {
+  const subtitleLabel = formatSubtitleLabel(subtitleStatus);
+  const subtitlePart = subtitleLabel ? ` • ${subtitleLabel}` : '';
+  return `${quality}${dubbedLabel}${subtitlePart}`.trim();
 }
 
 /**
@@ -407,14 +470,17 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
         const fallbackContext = `${buttonText} ${$epEl.text()} ${videoUrl}`;
         const quality = releaseInfo.quality || detectQuality(videoUrl, fallbackContext);
         const encoder = releaseInfo.encoder;
+        const subtitleStatus = releaseInfo.subtitleStatus;
         // Check if the content is dubbed based on episode text and video URL
         const dubbedLabel = isDubbed(`${$epEl.text()} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, dubbedLabel);
+        const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
         const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+        const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+        const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
 
         streams.push({
           name: streamName,
-          title: `S${targetSeason}E${targetEpisode} - ${quality}${encoderTitle}`,
+          title: `S${targetSeason}E${targetEpisode} - ${quality}${encoderTitle}${subtitleTitlePart}`,
           url: videoUrl
         });
         console.log(`Added stream: ${streamName}`);
@@ -431,6 +497,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
 function extractMovieStreams($) {
   const streams = [];
   console.log('Extracting movie streams...');
+  const pageReleaseInfo = extractReleaseInfoFromElement($, $('main, article, .single, .post, body').first()[0]);
 
   $('.download-list, .download-box, .dl-box').each((_, box) => {
     const $box = $(box);
@@ -455,14 +522,17 @@ function extractMovieStreams($) {
         const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
         const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
         const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
+        const subtitleStatus = releaseInfo.subtitleStatus || boxReleaseInfo.subtitleStatus || pageReleaseInfo.subtitleStatus;
         // Check if the content is dubbed based on text and video URL
         const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, dubbedLabel);
+        const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
         const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+        const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+        const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
 
         streams.push({
           name: streamName,
-          title: `${quality}${encoderTitle}`,
+          title: `${quality}${encoderTitle}${subtitleTitlePart}`,
           url: videoUrl
         });
       }
