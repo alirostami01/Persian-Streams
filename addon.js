@@ -543,6 +543,7 @@ module.exports = builder.getInterface();
 
 // Start server if run directly
 if (require.main === module) {
+  const http = require('http');
   const { getRouter } = require('stremio-addon-sdk');
   const addonInterface = builder.getInterface();
 
@@ -577,7 +578,21 @@ if (require.main === module) {
     );
   });
 
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`\nPort ${PORT} is already in use.`);
+      console.error('Stop the other process using this port, or start the addon with another port:');
+      console.error(`PORT=${Number(PORT) + 1 || 8001} npm start\n`);
+      process.exit(1);
+    }
+
+    console.error('Server error:', error);
+    process.exit(1);
+  });
+
+  server.listen(PORT, () => {
     console.log('\n===========================================');
     console.log(`${addonInterface.manifest.name} Stremio Addon (Iranian Source)`);
     console.log('===========================================');
