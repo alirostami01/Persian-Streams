@@ -168,6 +168,65 @@ function detectQuality(url, context = '') {
   return 'Unknown';
 }
 
+function toEnglishDigits(value) {
+  if (value === null || value === undefined) return '';
+
+  const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+
+  return String(value).replace(/[۰-۹٠-٩]/g, digit => {
+    const persianIndex = persianDigits.indexOf(digit);
+    if (persianIndex !== -1) return String(persianIndex);
+
+    const arabicIndex = arabicDigits.indexOf(digit);
+    if (arabicIndex !== -1) return String(arabicIndex);
+
+    return digit;
+  });
+}
+
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch (_) {
+    return value;
+  }
+}
+
+function extractReleaseFormatFromFilename(filename) {
+  if (!filename) return null;
+
+  const decodedFilename = decodeUrlPart(filename)
+    .replace(/\.(mkv|mp4|m3u8|avi)$/i, '')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const episodeMatch = decodedFilename.match(/\bS\d{1,2}\s*E\d{1,3}\b/i);
+  const releasePart = episodeMatch
+    ? decodedFilename.slice(episodeMatch.index + episodeMatch[0].length).trim()
+    : decodedFilename;
+
+  const releaseTokens = releasePart.split(/\s+/).filter(Boolean);
+  const formatTokens = releaseTokens.filter(token => (
+    /^(?:2160p|1080p|720p|480p|360p|4k|uhd|fhd|hd)$/i.test(token) ||
+    /^(?:web-?dl|web-?rip|blu-?ray|brrip|hdrip|dvdrip|hdtv)$/i.test(token) ||
+    /^(?:x264|x265|h264|h265|hevc|avc)$/i.test(token) ||
+    /^(?:10bit|8bit|hdr|dv|dolbyvision)$/i.test(token) ||
+    /^(?:nf|amzn|dsnp|hulu|atvp|max)$/i.test(token)
+  ));
+
+  return formatTokens.length > 0 ? formatTokens.join(' ') : null;
+}
+
+function resolveUrl(href, baseUrl) {
+  try {
+    return new URL(href, baseUrl).toString();
+  } catch (_) {
+    return href;
+  }
+}
+
 /**
  * Convert labels like `کیفیت : WEB-DL 4K 2160p 10bit HDR` to the clean
  * value that should be shown in Stremio (`WEB-DL 4K 2160p 10bit HDR`).
@@ -369,10 +428,132 @@ function isDubbed(text) {
     lowerText.includes('persian dub');
 }
 
+function extractSeasonNumberFromLegacyLink(text, href) {
+  const combined = toEnglishDigits(`${text || ''} ${decodeUrlPart(href || '')}`);
+
+  const seasonMatch = combined.match(/(?:فصل|season|\bS)\s*0*(\d{1,2})\b/i);
+  if (seasonMatch) return parseInt(seasonMatch[1], 10);
+
+  const folderMatch = combined.match(/\/S0*(\d{1,2})(?:\/|$)/i);
+  if (folderMatch) return parseInt(folderMatch[1], 10);
+
+  return null;
+}
+
+function extractEpisodeMatchFromFilename(filename, targetSeason, targetEpisode) {
+  const normalizedFilename = toEnglishDigits(decodeUrlPart(filename));
+  const seasonNum = parseInt(targetSeason, 10);
+  const episodeNum = parseInt(targetEpisode, 10);
+
+  const seasonEpisodeMatch = normalizedFilename.match(/\bS0*(\d{1,2})\s*E0*(\d{1,3})\b/i);
+  if (seasonEpisodeMatch) {
+    return parseInt(seasonEpisodeMatch[1], 10) === seasonNum &&
+      parseInt(seasonEpisodeMatch[2], 10) === episodeNum;
+  }
+
+  const xMatch = normalizedFilename.match(/\b0*(\d{1,2})x0*(\d{1,3})\b/i);
+  if (xMatch) {
+    return parseInt(xMatch[1], 10) === seasonNum &&
+      parseInt(xMatch[2], 10) === episodeNum;
+  }
+
+  const episodeOnlyMatch = normalizedFilename.match(/\bE0*(\d{1,3})\b/i);
+  return episodeOnlyMatch ? parseInt(episodeOnlyMatch[1], 10) === episodeNum : false;
+}
+
+async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, targetEpisode, pageSubtitleStatus = null) {
+  const streams = [];
+
+  try {
+    console.log(`Fetching legacy season directory: ${seasonUrl}`);
+    const response = await axios.get(seasonUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 15000,
+      maxRedirects: 5,
+      validateStatus: status => status < 500
+    });
+
+    if (response.status !== 200) {
+      console.log(`Legacy season directory returned status ${response.status}`);
+      return streams;
+    }
+
+    const finalUrl = response.request?.res?.responseUrl || seasonUrl;
+    const $directory = cheerio.load(response.data);
+
+    $directory('a[href]').each((_, link) => {
+      const href = $directory(link).attr('href');
+      if (!href || href === '../' || href.startsWith('?')) return;
+      if (!/\.(mkv|mp4|m3u8|avi)(?:$|[?#])/i.test(href)) return;
+
+      const filename = decodeUrlPart(href.split('/').pop().split('?')[0]);
+      if (!extractEpisodeMatchFromFilename(filename, targetSeason, targetEpisode)) return;
+
+      const videoUrl = resolveUrl(href, finalUrl);
+      const quality = extractReleaseFormatFromFilename(filename) || detectQuality(videoUrl, filename);
+      const dubbedLabel = isDubbed(`${filename} ${videoUrl}`) ? ' • دوبله' : '';
+      const subtitleStatus = detectPersianSubtitleStatus(filename) || pageSubtitleStatus;
+      const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+      const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+      const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+      streams.push({
+        name: streamName,
+        title: `S${targetSeason}E${targetEpisode} - ${quality}${subtitleTitlePart}`,
+        url: videoUrl
+      });
+      console.log(`Added legacy directory stream: ${streamName}`);
+    });
+  } catch (error) {
+    console.log(`Legacy season directory error: ${error.message}`);
+  }
+
+  return streams;
+}
+
+async function extractLegacySeriesStreams($, targetSeason, targetEpisode) {
+  const seasonLinks = [];
+  const pageSubtitleStatus = detectPersianSubtitleStatus($('main, article, .single, .post, body').first().text());
+
+  $('a[href]').each((_, link) => {
+    const $link = $(link);
+    const href = $link.attr('href');
+    const text = $link.text().trim();
+    if (!href) return;
+
+    const seasonNum = extractSeasonNumberFromLegacyLink(text, href);
+    if (seasonNum !== parseInt(targetSeason, 10)) return;
+
+    const decodedHref = decodeUrlPart(href);
+    const looksLikeSeasonDirectory = /\/S0*\d{1,2}\/?(?:$|[?#])/i.test(decodedHref) ||
+      /دانلود\s+فصل|download\s+season/i.test(toEnglishDigits(text));
+    if (!looksLikeSeasonDirectory) return;
+
+    const absoluteUrl = href.startsWith('http') ? href : resolveUrl(href, BASE_URL);
+    if (!seasonLinks.includes(absoluteUrl)) seasonLinks.push(absoluteUrl);
+  });
+
+  const streams = [];
+  for (const seasonUrl of seasonLinks) {
+    const directoryStreams = await extractStreamsFromSeasonDirectory(
+      seasonUrl,
+      targetSeason,
+      targetEpisode,
+      pageSubtitleStatus
+    );
+    streams.push(...directoryStreams);
+  }
+
+  return streams;
+}
+
 /**
  * Extract streams from series page for specific season/episode
  */
-function extractSeriesStreams($, targetSeason, targetEpisode) {
+async function extractSeriesStreams($, targetSeason, targetEpisode) {
   const streams = [];
   const targetEpNum = parseInt(targetEpisode, 10);
 
@@ -488,6 +669,11 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
     });
   });
 
+  if (streams.length === 0) {
+    const legacyStreams = await extractLegacySeriesStreams($, targetSeason, targetEpisode);
+    streams.push(...legacyStreams);
+  }
+
   return streams;
 }
 
@@ -574,7 +760,7 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   let streams = [];
   if (type === 'series' && season !== null && episode !== null) {
     console.log(`Looking for Season ${season}, Episode ${episode}`);
-    streams = extractSeriesStreams($, season, episode);
+    streams = await extractSeriesStreams($, season, episode);
   } else if (type === 'movie') {
     streams = extractMovieStreams($);
   }
