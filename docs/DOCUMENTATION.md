@@ -1,578 +1,966 @@
-# مستندات فنی Persian Streams Stremio Addon
+# مستندات فنی Iranian Provider Media / Persian Streams
 
-افزونه Stremio که لینک‌های پخش فیلم و سریال را از یک منبع ایرانی (پیکربندی شده از طریق `BASE_URL` در فایل `.env`) استخراج می‌کند. تمام محتوا شامل زیرنویس فارسی است.
+این سند بر اساس ساختار فعلی کد در `addon.js` بازنویسی شده است. نسخه فعلی پروژه یک افزونه غیررسمی Stremio با نام نمایشی **Persian Streams** است که فقط resource نوع `stream` ارائه می‌کند و لینک‌های پخش را از منبع ایرانی پیکربندی‌شده با `BASE_URL` استخراج می‌کند.
+
+> نکته مهم: در کد فعلی دیگر تابع‌هایی مثل `fetchTitleFromMeta`، `searchSite`، `slugifyTitle` یا `resolveViaEndpoint` وجود ندارند. مسیر فعلی تطبیق محتوا فقط از طریق `quick-search` و شناسه IMDb انجام می‌شود.
 
 ---
 
 ## فهرست مطالب
 
-- [نمودار جریان کلی](#نمودار-جریان-کلی)
-- [متغیرها و تنظیمات](#متغیرها-و-تنظیمات)
-- [تابع‌ها](#تابع‌ها)
-  - [fetchTitleFromMeta](#fetchtitlefrommeta)
-  - [searchSite](#searchsite)
-  - [slugifyTitle](#slugifytitle)
-  - [resolveViaQuickSearch](#resolveviaquicksearch)
-  - [resolveViaEndpoint](#resolveviaendpoint)
-  - [fetchPage](#fetchpage)
-  - [detectQuality](#detectquality)
-  - [isDubbed](#isdubbed)
-  - [extractSeriesStreams](#extractseriesstreams)
-  - [extractMovieStreams](#extractmoviestreams)
-  - [getStreams (هرдыنه اصلی)](#getstreams)
-- [هندلر استرمیو](#هندلر-استرمیو)
-- [سرور Express](#سرور-express)
-- [نمودار فراخوانی توابع](#نمودار-فراخوانی-توابع)
-- [ساختار داده خروجی](#ساختار-داده-خروجی)
-- [عیب‌یابی](#عیب‌یابی)
+- [نمای کلی معماری](#نمای-کلی-معماری)
+- [ساختار مخزن](#ساختار-مخزن)
+- [وابستگی‌ها و اسکریپت‌ها](#وابستگیها-و-اسکریپتها)
+- [متغیرهای محیطی](#متغیرهای-محیطی)
+- [Manifest افزونه](#manifest-افزونه)
+- [کلاینت HTTP](#کلاینت-http)
+- [جریان پردازش درخواست](#جریان-پردازش-درخواست)
+- [تابع‌ها و مسئولیت‌ها](#تابعها-و-مسئولیتها)
+- [سرور Express و routeها](#سرور-express-و-routeها)
+- [ساختار خروجی stream](#ساختار-خروجی-stream)
+- [نمونه درخواست‌ها](#نمونه-درخواستها)
+- [نکات استقرار](#نکات-استقرار)
+- [محدودیت‌ها و نکات نگهداری](#محدودیتها-و-نکات-نگهداری)
+- [عیب‌یابی](#عیبیابی)
+- [حمایت از پروژه](#حمایت-از-پروژه)
 
 ---
 
-## نمودار جریان کلی
+## نمای کلی معماری
 
-```
-کاربر در Stremio فیلم/سریالی را انتخاب می‌کند
-        │
-        ▼
-┌─────────────────────────────┐
-│  defineStreamHandler        │  ← نقطه ورود از Stremio (SDK)
-│  دریافت type + imdbId       │
-│  استخراج season/episode     │
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│  getStreams()               │  ← هماهنگ‌کننده اصلی
-│  ۵ مرحله جستجو + استخراج   │
-└─────────────┬───────────────┘
-              │
-   ┌──────────┼──────────┬──────────────┐
-   ▼          ▼          ▼              ▼
-resolveVia  resolveVia  searchSite   fetchPage
-QuickSearch Endpoint                + extract
-(JSON API)  (URL Slug)              Streams
-   │          │          │              │
-   └──────────┴──────────┴──────┬───────┘
-                                ▼
-                         لینک‌های ویدیو
-                         (URL + کیفیت)
-                                │
-                                ▼
-                         پاسخ به Stremio
+پروژه یک سرویس Node.js تک‌فایلی است:
+
+1. `addon.js` هنگام اجرا متغیرهای محیطی را می‌خواند.
+2. اگر `BASE_URL` تنظیم نشده باشد، برنامه متوقف می‌شود.
+3. یک `axios` client برای ارتباط با منبع ایرانی ساخته می‌شود.
+4. `stremio-addon-sdk` یک manifest و stream handler ثبت می‌کند.
+5. در صورت اجرای مستقیم (`node addon.js`)، یک سرور Express بالا می‌آید.
+6. Stremio برای فیلم یا سریال، endpointهای stream افزونه را فراخوانی می‌کند.
+7. افزونه با IMDb ID محتوا را از `quick-search` پیدا می‌کند.
+8. صفحه محتوا دانلود و با Cheerio تحلیل می‌شود.
+9. لینک‌های قابل پخش در قالب `{ streams: [...] }` به Stremio برگردانده می‌شوند.
+
+نمودار خلاصه:
+
+```text
+Stremio
+  │
+  │  GET /stream/movie/tt....json
+  │  GET /stream/series/tt....:S:E.json
+  ▼
+stremio-addon-sdk router
+  ▼
+defineStreamHandler(args)
+  ▼
+getStreams(type, imdbId, season, episode)
+  ▼
+resolveViaQuickSearch(imdbId)
+  │
+  ├─ اگر محتوا پیدا نشد → []
+  ▼
+fetchPage(contentUrl)
+  │
+  ├─ اگر HTML معتبر نبود → []
+  ▼
+extractMovieStreams($)
+یا
+extractSeriesStreams($, season, episode)
+  ▼
+{ streams: [...] }
 ```
 
 ---
 
-## متغیرها و تنظیمات
+## ساختار مخزن
 
-### متغیرهای محیطی (`.env`)
+```text
+.
+├── addon.js
+├── package.json
+├── package-lock.json
+├── README.md
+├── UNUSED_CODE_REPORT.md
+├── docs/
+│   └── DOCUMENTATION.md
+└── assets/
+    └── icons/
+        ├── logo.png
+        └── player-fa.png
+```
 
-| متغیر      | پیش‌فرض     | توضیح                                      |
-|------------|-------------|--------------------------------------------|
-| `PORT`     | `8000`      | پورت سرور HTTP                             |
-| `BASE_URL` | — (اجباری)  | آدرس منبع ایرانی (مثلاً `https://www.example.com`) |
-
-### متغیرهای سراسری
-
-| متغیر            | مقدار / توضیح                                                                 |
-|------------------|-------------------------------------------------------------------------------|
-| `PORT`           | از `.env` خوانده می‌شود، پیش‌فرض `8000`                                         |
-| `BASE_URL`       | آدرس پایه منبع، از `.env` خوانده می‌شود                                         |
-| `BASE_HOST`      | هاست (domain) استخراج شده از `BASE_URL` — مثلاً `www.example.com`               |
-| `contentUrlRegex`| رجکس داینامیک برای تطبیق صفحات محتوا: `/<id>/<slug>/`                         |
-| `client`         | نمونه axios با هدرها و تنایم‌اوت پیش‌فرض برای درخواست‌های HTTP                  |
-| `builder`        | نمونه `addonBuilder` از stremio-addon-sdk با منیفست افزونه                     |
-| `Persian_Streams`| نام نمایشی افزونه در لیست استریم‌ها                                             |
+| مسیر | نقش فعلی |
+|------|----------|
+| `addon.js` | نقطه ورود برنامه، تعریف manifest، منطق استخراج stream، export افزونه و سرور Express |
+| `package.json` | تعریف اسکریپت‌های اجرا و وابستگی‌ها |
+| `package-lock.json` | قفل نسخه وابستگی‌ها؛ نسخه قفل‌شده `cheerio` به Node.js جدید نیاز دارد |
+| `README.md` | راهنمای کاربر، نصب، اجرا و استقرار |
+| `docs/DOCUMENTATION.md` | مستندات فنی همین فایل |
+| `assets/icons/logo.png` | لوگوی manifest و فایل استاتیک اصلی |
+| `assets/icons/player-fa.png` | فایل استاتیک موجود؛ در manifest فعلی استفاده نشده است |
+| `UNUSED_CODE_REPORT.md` | گزارش تحلیل کدهای حذف‌شده/بلااستفاده و drift مستندات قدیمی |
 
 ---
 
-## تابع‌ها
+## وابستگی‌ها و اسکریپت‌ها
 
-### fetchTitleFromMeta
+### اسکریپت‌های npm
 
-```javascript
-async function fetchTitleFromMeta(type, imdbId) → { name, year } | null
-```
+| دستور | عملکرد |
+|------|--------|
+| `npm start` | اجرای `node addon.js` |
+| `npm run dev` | اجرای `node --watch addon.js` برای توسعه |
 
-**فایل:** `addon.js:76-98`
+### وابستگی‌های runtime
 
-**عملکرد:**
-با استفاده از شناسه IMDb، عنوان و سال ساخت محتوا را از سرویس Cinemeta استرمیو دریافت می‌کند. این اولین قدم در هر درخواست است — بدون عنوان، جستجو در سایت منبع ممکن نیست.
+| پکیج | کاربرد در پروژه |
+|------|-----------------|
+| `axios` | ارسال درخواست به منبع ایرانی و دریافت quick-search / HTML صفحه محتوا |
+| `cheerio` | parse کردن HTML و انتخاب المان‌ها با selectorهای شبیه jQuery |
+| `dotenv` | خواندن فایل `.env` |
+| `express` | سرور HTTP مستقل برای manifest، assets و routeهای افزونه |
+| `stremio-addon-sdk` | ساخت manifest، تعریف stream handler و تولید router استاندارد Stremio |
 
-**ورودی:**
-- `type`: نوع محتوا (`'movie'` یا `'series'`)
-- `imdbId`: شناسه IMDb (مثلاً `tt11198330`)
+### نسخه Node.js
 
-**خروجی:**
-- آبجکت `{ name: "House of the Dragon", year: 2022 }` یا `null`
-
-**منبع داده:**
-```
-https://v3-cinemeta.strem.io/meta/{type}/{imdbId}.json
-```
-
-**فراخوانی شده توسط:** `getStreams`
+در `package.json` مقدار `engines` تعریف نشده، اما با توجه به `package-lock.json`، نسخه نصب‌شده `cheerio` در زنجیره وابستگی خود به Node.js `>=20.18.1` نیاز دارد. بنابراین برای نصب بدون هشدار و اجرای پایدار، Node.js `20.18.1` یا بالاتر توصیه می‌شود.
 
 ---
 
-### searchSite
+## متغیرهای محیطی
 
-```javascript
-async function searchSite(query) → string | null
+کد در ابتدای اجرا `dotenv` را load می‌کند:
+
+```js
+require('dotenv').config();
 ```
 
-**فایل:** `addon.js:107-151`
+سپس مقادیر زیر استفاده می‌شوند:
 
-**عملکرد:**
-در سایت منبع با عبارت جستجو (query) جستجو کرده و بهترین نتیجه را برمی‌گرداند. از الگوریتم امتیازدهی برای رتبه‌بندی نتایج استفاده می‌کند.
+| متغیر | پیش‌فرض | اجباری؟ | توضیح |
+|-------|---------|---------|-------|
+| `BASE_URL` | ندارد | بله | آدرس پایه منبع ایرانی. تمام درخواست‌های quick-search و صفحه محتوا بر اساس آن انجام می‌شوند. |
+| `PORT` | `8000` | خیر | پورت سرور Express در حالت اجرای مستقیم. |
+| `PUBLIC_URL` | `http://localhost:{PORT}` در manifest اولیه | خیر | origin عمومی افزونه برای ساخت URL مطلق لوگو. در route سفارشی `/manifest.json` اگر تنظیم نشده باشد، origin از Host درخواست ساخته می‌شود. |
 
-**ورودی:**
-- `query`: عبارت جستجو (مثلاً `"House of the Dragon"`)
+نمونه `.env`:
 
-**خروجی:**
-- URL صفحه محتوا (مثلاً `https://www.example.com/76906/house-of-the-dragon/`) یا `null`
+```env
+PORT=8000
+BASE_URL=https://www.example.com
+PUBLIC_URL=https://your-addon-domain.example
+```
 
-**الگوریتم:**
-1. درخواست GET به `/?s={query}` ارسال می‌شود
-2. پاسخ HTML با `cheerio` پردازش می‌شود
-3. تمام لینک‌هایی که با الگوی `/<id>/<slug>/` تطبیق پیدا کنند، کاندید می‌شوند
-4. هر کاندید بر اساس تعداد توکن‌های query که در slug وجود دارد، امتیاز می‌گیرد
-5. بهترین نتیجه (بالاترین امتیاز) برگردانده می‌شود
+رفتار مهم:
 
-**استفاده از:** `contentUrlRegex` (رجکس سراسری)
+```js
+if (!BASE_URL) {
+  console.error('BASE_URL is not set...');
+  process.exit(1);
+}
+```
 
-**فراخوانی شده توسط:** `getStreams`
+یعنی نبودن `BASE_URL` حتی در زمان import شدن `addon.js` نیز باعث خروج process می‌شود.
 
 ---
 
-### slugifyTitle
+## Manifest افزونه
 
-```javascript
-function slugifyTitle(title) → string
+Manifest با `addonBuilder` ساخته می‌شود:
+
+```js
+const builder = new addonBuilder({
+  id: 'org.alirostami.streams.persian',
+  name: 'Persian Streams',
+  version: '1.2.0',
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  idPrefixes: ['tt'],
+  catalogs: [],
+  logo: LOGO
+});
 ```
 
-**فایل:** `addon.js:158-165`
+| فیلد | مقدار فعلی | توضیح |
+|------|------------|-------|
+| `id` | `org.alirostami.streams.persian` | شناسه افزونه در Stremio |
+| `name` | `Persian Streams` | نام نمایشی افزونه |
+| `version` | `1.2.0` | نسخه manifest، مستقل از نسخه `package.json` |
+| `resources` | `['stream']` | افزونه فقط لینک stream برمی‌گرداند |
+| `types` | `['movie', 'series']` | پشتیبانی از فیلم و سریال |
+| `idPrefixes` | `['tt']` | فقط شناسه‌های IMDb پشتیبانی می‌شوند |
+| `catalogs` | `[]` | catalog اختصاصی ندارد |
+| `logo` | URL مطلق لوگو | در manifest route بازنویسی می‌شود تا با host فعلی سازگار باشد |
+| `contactEmail` | `rostami.ali@gmail.com` | ایمیل تماس ثبت‌شده در manifest |
+| `author` | `Ali Rostami rostami.ali@gmail.com` | نویسنده manifest |
 
-**عملکرد:**
-یک عنوان محتوا را به یک slug سازگار با URL تبدیل می‌کند. این slug برای دسترسی مستقیم به صفحه محتوا استفاده می‌شود.
+توضیح manifest شامل وب‌سایت حمایت و مخزن GitHub نیز هست:
 
-**ورودی:**
-- `title`: عنوان محتوا (مثلاً `"Don't Say Good Luck"`)
-
-**خروجی:**
-- slug (مثلاً `dont-say-good-luck`)
-
-**تبدیل‌ها:**
-1. حروف به کوچک تبدیل می‌شوند (`toLowerCase`)
-2. کوتیشن‌ها و آپاستروف‌ها حذف می‌شوند
-3. کاراکترهای غیر الفبایی با خط تیره جایگزین می‌شوند
-4. خط‌تیره‌های اضافی ابتدا/انتها حذف می‌شوند
-5. خط‌تیره‌های پشت سر هم یکی می‌شوند
-
-**فراخوانی شده توسط:** `resolveViaEndpoint`
+```text
+Website: alirostami.com/support
+GitHub: https://github.com/alirostami01/iranian-provider-media
+```
 
 ---
 
-### resolveViaQuickSearch
+## کلاینت HTTP
 
-```javascript
-async function resolveViaQuickSearch(imdbId) → string | null
+یک نمونه `axios` با تنظیمات ثابت ساخته می‌شود:
+
+```js
+const client = axios.create({
+  baseURL: BASE_URL,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 ...',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Referer': BASE_URL,
+  },
+  timeout: 15000,
+  maxRedirects: 5,
+  validateStatus: status => status < 500
+});
 ```
 
-**فایل:** `addon.js:175-207`
+نکات:
 
-**عملکرد:**
-دقیق‌ترین روش تطبیق محتوا. از اندپوینت `quick-search` سایت منبع با شناسه IMDb استفاده می‌کند و نتیجه‌ای که `imdb_id` آن با درخواست تطبیق داشته باشد برمی‌گرداند.
-
-**ورودی:**
-- `imdbId`: شناسه IMDb
-
-**خروجی:**
-- URL صفحه محتوا یا `null`
-
-**مزیت:** چون مستقیماً با شناسه IMDb کار می‌کند، نیازی به تبدیل عنوان به slug نیست و احتمال خطا کمتر است.
-
-**.Endpoint:** `/quick-search?q={imdbId}&sort=modified_at%3Adesc`
-
-**فراخوانی شده توسط:** `getStreams` (اولین انتخاب)
+- `baseURL` برای endpoint نسبی `quick-search` استفاده می‌شود.
+- timeout برابر ۱۵ ثانیه است.
+- تا ۵ redirect دنبال می‌شود.
+- statusهای زیر ۵۰۰ توسط axios throw نمی‌شوند؛ کد خودش status را بررسی می‌کند.
+- برای شبیه‌سازی مرورگر، هدرهای `User-Agent`، `Accept` و `Referer` ارسال می‌شوند.
 
 ---
 
-### resolveViaEndpoint
+## جریان پردازش درخواست
 
-```javascript
-async function resolveViaEndpoint(title, type) → string | null
+### فیلم
+
+```text
+GET /stream/movie/tt1234567.json
+  ↓
+defineStreamHandler
+  ↓
+imdbId = 'tt1234567'
+  ↓
+getStreams('movie', 'tt1234567')
+  ↓
+resolveViaQuickSearch('tt1234567')
+  ↓
+GET {BASE_URL}/quick-search?q=tt1234567&sort=modified_at%3Adesc
+  ↓
+پیدا کردن آیتمی که imdb_id آن برابر tt1234567 است
+  ↓
+fetchPage(contentUrl)
+  ↓
+extractMovieStreams($)
+  ↓
+{ streams: [...] }
 ```
 
-**فایل:** `addon.js:219-238`
+### سریال
 
-**عملکرد:**
-با استفاده از عنوان محتوا (تبدیل شده به slug)، مستقیماً به اندپوینت محتوا درخواست می‌فرستد. رفتار سایت بر اساس نوع محتوا متفاوت است:
-
-- **فیلم:** `/movie/{slug}/` → ریدایرکت 302 به `/{id}/{slug}/` (صفحه محتوا)
-- **سریال:** `/series/{slug}/` → مستقیماً صفحه محتوا (HTTP 200)
-- **نامعتبر:** ریدایرکت به `/profile/` (تلقی می‌شود = پیدا نشد)
-
-**ورودی:**
-- `title`: عنوان محتوا
-- `type`: `'movie'` یا `'series'`
-
-**خروجی:**
-- URL نهایی صفحه محتوا یا `null`
-
-**استفاده از:** `slugifyTitle`
-
-**فراخوانی شده توسط:** `getStreams` (انتخاب دوم)
+```text
+GET /stream/series/tt1234567:2:5.json
+  ↓
+defineStreamHandler
+  ↓
+id.split(':') → imdbId='tt1234567', season=2, episode=5
+  ↓
+getStreams('series', 'tt1234567', 2, 5)
+  ↓
+resolveViaQuickSearch('tt1234567')
+  ↓
+fetchPage(contentUrl)
+  ↓
+extractSeriesStreams($, 2, 5)
+  ↓
+{ streams: [...] }
+```
 
 ---
 
-### fetchPage
+## تابع‌ها و مسئولیت‌ها
 
-```javascript
-async function fetchPage(url) → cheerio.Root | null
+### `resolveViaQuickSearch(imdbId)`
+
+```js
+async function resolveViaQuickSearch(imdbId) // Promise<string|null>
 ```
 
-**فایل:** `addon.js:243-255`
+مسئول پیدا کردن URL نهایی صفحه محتوا از روی شناسه IMDb است.
 
-**عملکرد:**
-یک صفحه HTML را دانلود و با `cheerio` پردازش می‌کند. شیء برگشتی (`$`) امکان جستجوی المان‌ها در DOM را فراهم می‌کند.
+مراحل:
 
-**ورودی:**
-- `url`: URL صفحه
+1. مسیر زیر ساخته می‌شود:
 
-**خروجی:**
-- شیء `cheerio` (operable `$`) یا `null` در صورت خطا
+   ```text
+   /quick-search?q={imdbId}&sort=modified_at%3Adesc
+   ```
 
-**فراخوانی شده توسط:** `getStreams`
+2. با `client.get` درخواست ارسال می‌شود.
+3. اگر status برابر `200` نباشد یا پاسخ آرایه نباشد، `null` برمی‌گردد.
+4. در آرایه پاسخ، اولین آیتمی انتخاب می‌شود که:
+
+   ```js
+   (r.imdb_id || '').toLowerCase() === imdbId.toLowerCase()
+   ```
+
+5. اگر `url` نسبی باشد، با `BASE_URL` کامل می‌شود.
+6. اگر URL شامل `/profile/` باشد، به عنوان «پیدا نشد» رد می‌شود.
+7. در موفقیت، URL کامل صفحه محتوا برگردانده می‌شود.
+
+خروجی نمونه مورد انتظار از منبع:
+
+```json
+[
+  {
+    "imdb_id": "tt1234567",
+    "url": "/12345/example-title/"
+  }
+]
+```
 
 ---
 
-### detectQuality
+### `fetchPage(url)`
 
-```javascript
-function detectQuality(url, context) → string
+```js
+async function fetchPage(url) // Promise<cheerio.Root|null>
 ```
 
-**فایل:** `addon.js:260-279`
+صفحه HTML محتوا را دریافت و parse می‌کند.
 
-**عملکرد:**
-کیفیت ویدیو را از روی URL و متن پیرامونی تشخیص می‌دهد. ابتدا متن ترکیبی (URL + context) را بررسی می‌کند، سپس پارامتر `quality` در URL را.
+رفتار:
 
-**ورودی:**
-- `url`: URL ویدیو
-- `context`: متن اضافی (مثلاً متن دکمه یا عنوان اپیزود)
-
-**خروجی:**
-- یکی از: `'4K'`, `'1080p'`, `'720p'`, `'480p'`, `'360p'`, `'Unknown'`
-
-**اولویت تشخیص:**
-1. `2160` / `4k` / `uhd` → 4K
-2. `1080` / `full hd` / `fhd` → 1080p
-3. `720` / `hd` → 720p
-4. `480` / `sd` → 480p
-5. `360` → 360p
-6. پارامتر `?quality=...` در URL
-7. در غیر این صورت → `'Unknown'`
-
-**فراخوانی شده توسط:** `extractSeriesStreams`, `extractMovieStreams`
+- درخواست GET به URL داده‌شده ارسال می‌شود.
+- فقط status `200` پذیرفته می‌شود.
+- پاسخ باید رشته HTML باشد.
+- در موفقیت `cheerio.load(response.data)` برگردانده می‌شود.
+- در خطا، `null` برمی‌گردد و پیام خطا در log چاپ می‌شود.
 
 ---
 
-### isDubbed
+### `detectQuality(url, context = '')`
 
-```javascript
-function isDubbed(text) → boolean
+```js
+function detectQuality(url, context = '') // '4K' | '1080p' | '720p' | '480p' | '360p' | 'Unknown'
 ```
 
-**فایل:** `addon.js:287-296`
+کیفیت ویدیو را از URL و متن پیرامونی تشخیص می‌دهد.
 
-**عملکرد:**
-بررسی می‌کند آیا متن شامل نشانه‌های دوبله فارسی است یا خیر.
+مراحل:
 
-**ورودی:**
-- `text`: متن بررسی (متن دکمه، نام فایل، URL ویدیو)
+1. ابتدا URL با `decodeURIComponent` decode می‌شود تا کیفیت‌های percent-encoded نیز قابل تشخیص باشند.
+2. URL decode‌شده و `context` کنار هم قرار می‌گیرند و lowercase می‌شوند.
+3. الگوهای زیر بررسی می‌شوند:
 
-**خروجی:**
-- `true` اگر دوبله باشد، `false` در غیر این صورت
+| خروجی | نشانه‌ها |
+|-------|----------|
+| `4K` | `2160`، `4k`، `uhd` |
+| `1080p` | `1080`، `full hd`، `fhd` |
+| `720p` | `720` یا کلمه مستقل `hd` |
+| `480p` | `480` یا کلمه مستقل `sd` |
+| `360p` | `360` |
+| `Unknown` | هیچ‌کدام از موارد بالا پیدا نشود |
 
-**عبارات جستجو:**
+برای جلوگیری از تشخیص اشتباه در hashهای CDN، `hd` و `sd` فقط به صورت کلمه مستقل تشخیص داده می‌شوند.
+
+---
+
+### `normalizeDigits(text)`
+
+```js
+function normalizeDigits(text) // string
+```
+
+اعداد فارسی (`۰۱۲۳۴۵۶۷۸۹`) و عربی-هندی (`٠١٢٣٤٥٦٧٨٩`) را به اعداد ASCII تبدیل می‌کند.
+
+کاربرد فعلی:
+
+- تشخیص شماره فصل از متن دکمه فصل
+- تشخیص شماره قسمت از متن دکمه اپیزود
+
+نمونه:
+
+```text
+"فصل ۲ - قسمت ۵" → "فصل 2 - قسمت 5"
+```
+
+---
+
+### `isDubbed(text)`
+
+```js
+function isDubbed(text) // boolean
+```
+
+بررسی می‌کند آیا متن شامل نشانه‌های نسخه دوبله است یا نه.
+
+کلمات کلیدی فعلی:
+
 - `dubbed`
 - `dooble`
 - `دوبله`
 - `farsi dub`
 - `persian dub`
 
-**فراخوانی شده توسط:** `extractSeriesStreams`, `extractMovieStreams`
+اگر یکی از این موارد در متن دکمه، عنوان، نام فایل یا URL وجود داشته باشد، در خروجی stream برچسب `• دوبله` اضافه می‌شود.
 
 ---
 
-### extractSeriesStreams
+### `extractSeriesStreams($, targetSeason, targetEpisode)`
 
-```javascript
-function extractSeriesStreams($, targetSeason, targetEpisode) → Stream[]
+```js
+function extractSeriesStreams($, targetSeason, targetEpisode) // Stream[]
 ```
 
-**فایل:** `addon.js:301-411`
+از صفحه سریال، لینک‌های پخش فصل و قسمت مشخص را استخراج می‌کند.
 
-**عملکرد:**
-از صفحه HTML یک سریال، لینک‌های پخش برای فصل و قسمت مشخص استخراج می‌کند. این پیچیده‌ترین تابع در برنامه است چون ساختار HTML سایت منبع را تحلیل می‌کند.
+#### ورودی‌ها
 
-**ورودی:**
-- `$`: شیء cheerio (DOM پردازش شده)
-- `targetSeason`: شماره فصل مورد نظر
-- `targetEpisode`: شماره قسمت مورد نظر
+| ورودی | توضیح |
+|-------|-------|
+| `$` | شیء Cheerio ساخته‌شده از HTML صفحه سریال |
+| `targetSeason` | شماره فصل درخواستی از Stremio |
+| `targetEpisode` | شماره قسمت درخواستی از Stremio |
 
-**خروجی:**
-- آرایه‌ای از آبجکت‌های Stream
+#### شناسایی فصل
 
-**مراحل استخراج:**
+Selector اصلی فصل‌ها:
 
-#### ۱. شناسایی فصل‌ها
-- المان‌های `.download-season` حاوی اطلاعات فصل هستند
-- شماره فصل از متن دکمه خوانده می‌شود
-- پشتیبانی از اعداد فارسی: اول=۱, دوم=۲, سوم=۳, ... دهم=۱۰
-- پشتیبانی از الگوهای `season 3` یا `فصل ۳`
-
-#### ۲. شناسایی اپیزودها
-- المان‌های `.series-downloaditems .d-flex` حاوی اپیزودها هستند
-- شماره اپیزود از متن دکمه خوانده می‌شود
-- پشتیبانی از `قسمت ۵` یا `episode 5` یا `ep 5`
-- اگر متن عدد نداشت، از پارامتر `?episode=` در URL خوانده می‌شود
-
-#### ۳. استخراج لینک ویدیو (۳ استراتژی)
-- **استراتژی ۱:** هندلر `onclick` روی دکمه (`handleDownloadClick('URL')`)
-- **استراتژی ۲:** لینک مستقیم `href` حاوی `.mkv` یا `.mp4`
-- **استراتژی ۳:** بررسی المان‌های خواهر (`a[onclick]`)
-
-#### ۴. تشخیص کیفیت و دوبله
-- `detectQuality()` کیفیت را تشخیص می‌دهد
-- `isDubbed()` برچسب دوبله را اضافه می‌کند
-
-**فراخوانی شده توسط:** `getStreams` (فقط برای سریال)
-
----
-
-### extractMovieStreams
-
-```javascript
-function extractMovieStreams($) → Stream[]
+```css
+.download-season
 ```
 
-**فایل:** `addon.js:416-461`
+برای هر فصل:
 
-**عملکرد:**
-از صفحه HTML یک فیلم، لینک‌های پخش را استخراج می‌کند.
+1. دکمه فصل از selector زیر خوانده می‌شود:
 
-**ورودی:**
-- `$`: شیء cheerio (DOM پردازش شده)
+   ```css
+   button[data-bs-toggle="collapse"]
+   ```
 
-**خروجی:**
-- آرایه‌ای از آبجکت‌های Stream
+2. اگر متن شامل نام ترتیبی فارسی باشد، season number تنظیم می‌شود:
 
-**مراحل:**
+   | متن | عدد |
+   |-----|-----|
+   | `اول` | 1 |
+   | `دوم` | 2 |
+   | `سوم` | 3 |
+   | `چهارم` | 4 |
+   | `پنجم` | 5 |
+   | `ششم` | 6 |
+   | `هفتم` | 7 |
+   | `هشتم` | 8 |
+   | `نهم` | 9 |
+   | `دهم` | 10 |
 
-#### ۱. باکس‌های دانلود
-- المان‌های `.download-list`, `.download-box`, `.dl-box` بررسی می‌شوند
-- لینک‌هایی با پسوند `.mkv` یا `.mp4` استخراج می‌شوند
-- اگر هندلر `onclick` وجود داشته باشد، URL واقعی از آن خوانده می‌شود
-- کیفیت و دوبله تشخیص داده می‌شود
+3. اگر متن شامل الگوی عددی باشد، مقدار عددی override می‌شود:
 
-#### ۲. iframeها
-- المان‌های `iframe[src]` حاوی `.mp4` یا `.m3u8` بررسی می‌شوند
-- این‌ها استریم‌های جاسازی شده هستند
+   ```regex
+   /(?:season|فصل)\s*(\d+)/i
+   ```
 
-**فراخوانی شده توسط:** `getStreams` (فقط برای فیلم)
+4. اگر فصل با `targetSeason` برابر نباشد، آن فصل نادیده گرفته می‌شود.
 
----
+#### شناسایی قسمت
 
-### getStreams
+Selector آیتم‌های قسمت:
 
-```javascript
-async function getStreams(type, imdbId, season, episode) → Stream[]
+```css
+.series-downloaditems .d-flex
 ```
 
-**فایل:** `addon.js:466-539`
+برای هر قسمت، لینک اصلی از این selector خوانده می‌شود:
 
-**عملکرد:**
-هماهنگ‌کننده اصلی برنامه. تمام مراحل جستجو، تطبیق و استخراج را اجرا می‌کند. این تابع точته ورود اصلی منطق برنامه است.
-
-**ورودی:**
-- `type`: `'movie'` یا `'series'`
-- `imdbId`: شناسه IMDb
-- `season`: شماره فصل (فقط برای سریال)
-- `episode`: شماره قسمت (فقط برای سریال)
-
-**خروجی:**
-- آرایه‌ای از آبجکت‌های Stream (ممکن است خالی باشد)
-
-**۵ مرحله:**
-
-#### مرحله ۱: دریافت متادیتا
-```
-fetchTitleFromMeta(type, imdbId) → { name, year }
-```
-عنوان و سال از سرویس Cinemeta استرمیو دریافت می‌شود.
-
-#### مرحله ۲: تطبیق از طریق quick-search (اولویت اول)
-```
-resolveViaQuickSearch(imdbId) → URL | null
-```
-دقیق‌ترین روش — مستقیماً با شناسه IMDb.
-
-#### مرحله ۳: تطبیق از طریق اندپوینت مستقیم (اولویت دوم)
-```
-resolveViaEndpoint(title, type) → URL | null
-```
-با استفاده از slug عنوان.
-
-#### مرحله ۴: تطبیق از طریق جستجو (اولویت سوم)
-```
-searchSite(query) → URL | null
-```
-با چند عبارت جستجو (عنوان، عنوان+سال، عنوان با کوتیشن فارسی).
-
-#### مرحله ۵: استخراج لینک‌ها
-```
-fetchPage(contentUrl) → $ | null
-```
-صفحه دانلود و پردازش می‌شود:
-- اگر سریال → `extractSeriesStreams($, season, episode)`
-- اگر فیلم → `extractMovieStreams($)`
-
----
-
-## هندلر استرمیو
-
-```javascript
-builder.defineStreamHandler((args) => { ... })
+```css
+a.btn-block.btn-default
 ```
 
-**فایل:** `addon.js:542-564`
+شماره قسمت با این ترتیب تشخیص داده می‌شود:
 
-**عملکرد:**
-نقطه ورود از Stremio. SDK استرمیو این تابع را با آرگومان‌های درخواست کاربر فراخوانی می‌کند.
+1. متن فارسی: `قسمت 5`
+2. متن انگلیسی: `episode 5` یا `ep 5`
+3. پارامتر URL: `?episode=5`
+4. در نهایت، اندیس آیتم در لیست (`epIdx + 1`)
 
-**آرگومان‌های دریافتی:**
-```javascript
+#### استخراج URL ویدیو
+
+دو روش فعلی:
+
+1. جستجوی همه لینک‌های دارای `onclick` در ردیف اپیزود و استخراج URL از:
+
+   ```js
+   handleDownloadClick('URL')
+   handleDownloadClick("URL")
+   ```
+
+2. اگر مورد قبلی پیدا نشد، استفاده از `href` لینک اصلی در صورتی که شامل `.mkv`، `.mp4` یا `http` باشد.
+
+#### خروجی
+
+برای هر لینک پیدا شده:
+
+```js
 {
-  type: 'movie' | 'series',
-  id: 'tt11198330' | 'tt11198330:1:3'  // برای سریال: imdbId:season:episode
+  name: "1080p • دوبله",
+  title: "S2E5 - 1080p",
+  url: "https://cdn.example.com/video.mkv"
 }
 ```
 
-**پردازش:**
-1. اگر سریال باشد، `id` با `:` جدا شده و `imdbId`, `season`, `episode` استخراج می‌شوند
-2. `getStreams` فراخوانی می‌شود
-3. نتیجه به صورت `{ streams: [...] }` برگردانده می‌شود
+اگر نسخه دوبله تشخیص داده نشود:
+
+```js
+{
+  name: "1080p",
+  title: "S2E5 - 1080p",
+  url: "https://cdn.example.com/video.mkv"
+}
+```
 
 ---
 
-## سرور Express
+### `extractMovieStreams($)`
 
-**فایل:** `addon.js:570-613`
+```js
+function extractMovieStreams($) // Stream[]
+```
 
-فقط زمانی اجرا می‌شود که فایل به صورت مستقیم اجرا شود (`node addon.js`).
+از صفحه فیلم لینک‌های پخش را استخراج می‌کند.
 
-### روت‌ها
+#### باکس‌های دانلود
 
-| روت                       | توضیح                                      |
-|---------------------------|--------------------------------------------|
-| `GET /manifest.json`      | منیفست افزونه با لوگوی مطلق               |
-| `GET /`                   | صفحه اصلی با لینک نصب                     |
-| `GET /assets/icons/*`     | سرو فایل‌های استاتیک (لوگو)                |
-| `GET /:resource/:type/:id.json` | هندلر استریم (از getRouter SDK)   |
+Selectorهای کانتینر:
 
-### روت سفارشی manifest.json
+```css
+.download-list, .download-box, .dl-box
+```
 
-چون Stremio به URL مطلق برای لوگو نیاز دارد، روت سفارشی `manifest.json` قبل از `getRouter` SDK ثبت شده و `logo` را با URL مطلق بر اساس درخواست تنظیم می‌کند:
+داخل هر کانتینر، لینک‌هایی بررسی می‌شوند که `href` آن‌ها شامل یکی از موارد زیر باشد:
 
-```javascript
+```css
+a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]
+```
+
+برای هر لینک:
+
+1. مقدار `href` به عنوان URL اولیه در نظر گرفته می‌شود.
+2. اگر `onclick` شامل `handleDownloadClick('URL')` باشد، URL واقعی از آن استخراج و جایگزین می‌شود.
+3. کیفیت با `detectQuality` تشخیص داده می‌شود.
+4. دوبله با `isDubbed` تشخیص داده می‌شود.
+5. stream به آرایه خروجی اضافه می‌شود.
+
+خروجی نمونه:
+
+```js
+{
+  name: "720p • دوبله",
+  title: "720p",
+  url: "https://cdn.example.com/movie-720p.mp4"
+}
+```
+
+#### iframeها
+
+علاوه بر باکس‌های دانلود، همه `iframe[src]`ها بررسی می‌شوند. اگر `src` شامل `.mp4` یا `.m3u8` باشد، یک stream با عنوان `Embedded Stream` ساخته می‌شود:
+
+```js
+{
+  name: "Stream",
+  title: "Embedded Stream",
+  url: "https://example.com/player/video.m3u8"
+}
+```
+
+---
+
+### `getStreams(type, imdbId, season = null, episode = null)`
+
+```js
+async function getStreams(type, imdbId, season = null, episode = null) // Stream[]
+```
+
+هماهنگ‌کننده اصلی منطق استخراج است.
+
+مراحل:
+
+1. اطلاعات درخواست در log چاپ می‌شود.
+2. `resolveViaQuickSearch(imdbId)` فراخوانی می‌شود.
+3. اگر URL محتوا پیدا نشود، `[]` برمی‌گردد.
+4. `fetchPage(contentUrl)` فراخوانی می‌شود.
+5. اگر صفحه قابل خواندن نباشد، `[]` برمی‌گردد.
+6. اگر `type === 'series'` و season/episode وجود داشته باشد:
+
+   ```js
+   extractSeriesStreams($, season, episode)
+   ```
+
+7. اگر `type === 'movie'` باشد:
+
+   ```js
+   extractMovieStreams($)
+   ```
+
+8. تعداد streamهای پیدا شده log می‌شود و آرایه خروجی برگردانده می‌شود.
+
+---
+
+### `builder.defineStreamHandler((args) => { ... })`
+
+هندلر رسمی Stremio برای دریافت درخواست‌های stream است.
+
+ورودی نمونه فیلم:
+
+```js
+{
+  type: 'movie',
+  id: 'tt1234567'
+}
+```
+
+ورودی نمونه سریال:
+
+```js
+{
+  type: 'series',
+  id: 'tt1234567:1:3'
+}
+```
+
+رفتار:
+
+- برای فیلم، کل `id` همان `imdbId` است.
+- برای سریال، `id` با `:` جدا می‌شود:
+
+  ```js
+  imdbId = parts[0]
+  season = parseInt(parts[1], 10)
+  episode = parseInt(parts[2], 10)
+  ```
+
+- سپس `getStreams` فراخوانی می‌شود.
+- خروجی همیشه در قالب استاندارد زیر به SDK داده می‌شود:
+
+```js
+{ streams }
+```
+
+اگر خطایی رخ دهد، خطا log شده و خروجی خالی برگردانده می‌شود:
+
+```js
+{ streams: [] }
+```
+
+---
+
+### Export افزونه
+
+پس از تعریف handler:
+
+```js
+const addonInterface = builder.getInterface();
+module.exports = addonInterface;
+```
+
+این export برای سناریوهایی لازم است که افزونه توسط یک میزبان دیگر import می‌شود، نه اینکه مستقیماً با `node addon.js` اجرا شود.
+
+---
+
+## سرور Express و routeها
+
+سرور Express فقط زمانی اجرا می‌شود که فایل مستقیماً اجرا شود:
+
+```js
+if (require.main === module) {
+  const { getRouter } = require('stremio-addon-sdk');
+  const app = express();
+  ...
+  app.listen(PORT, ...);
+}
+```
+
+### routeهای ثبت‌شده
+
+| route | منبع ثبت | توضیح |
+|-------|----------|-------|
+| `GET /manifest.json` | route سفارشی پروژه | برگرداندن manifest با URL مطلق لوگو |
+| `GET /assets/icons/*` | `express.static` | سرو کردن فایل‌های `assets/icons` |
+| `GET /stream/movie/{id}.json` | `getRouter(addonInterface)` | streamهای فیلم |
+| `GET /stream/series/{id}:{season}:{episode}.json` | `getRouter(addonInterface)` | stream قسمت سریال |
+| `GET /` | route ساده پروژه | صفحه معرفی کوتاه و لینک نصب محلی |
+
+در نسخه فعلی route مجزایی برای `/health` وجود ندارد.
+
+### route سفارشی manifest
+
+Stremio برای تصویر manifest به URL مطلق نیاز دارد. به همین دلیل route سفارشی `/manifest.json` قبل از router SDK تعریف شده است:
+
+```js
 app.get('/manifest.json', (req, res) => {
-  const protocol = req.protocol || 'http';
-  const host = req.get('host') || `localhost:${PORT}`;
+  const origin = process.env.PUBLIC_URL
+    ? PUBLIC_URL
+    : `${req.protocol}://${req.get('host') || `localhost:${PORT}`}`;
+
   const manifestWithLogo = {
     ...addonInterface.manifest,
-    logo: `${protocol}://${host}/assets/icons/logo.png`
+    logo: `${origin}${LOGO_PATH}`
   };
-  res.json(manifestWithLogo);
+
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(manifestWithLogo));
 });
 ```
 
----
+رفتار:
 
-## نمودار فراخوانی توابع
-
-```
-defineStreamHandler (SDK callback)
-  │
-  └─► getStreams(type, imdbId, season, episode)
-        │
-        ├─► fetchTitleFromMeta(type, imdbId)
-        │     └─► HTTP GET → v3-cinemeta.strem.io
-        │
-        ├─► resolveViaQuickSearch(imdbId)          [اولویت ۱]
-        │     └─► HTTP GET → /quick-search?q=...
-        │
-        ├─► resolveViaEndpoint(title, type)         [اولویت ۲]
-        │     ├─► slugifyTitle(title)
-        │     └─► HTTP GET → /movie/{slug}/ یا /series/{slug}/
-        │
-        ├─► searchSite(query)                       [اولویت ۳]
-        │     ├─► HTTP GET → /?s={query}
-        │     ├─► cheerio.load() → پردازش HTML
-        │     └─► contentUrlRegex.test() → فیلتر نتایج
-        │
-        ├─► fetchPage(contentUrl)
-        │     ├─► HTTP GET → صفحه محتوا
-        │     └─► cheerio.load() → پردازش HTML
-        │
-        └─► یکی از:
-              ├─► extractSeriesStreams($, season, episode)   [series]
-              │     ├─► detectQuality(url, context)
-              │     └─► isDubbed(text)
-              │
-              └─► extractMovieStreams($)                     [movie]
-                    ├─► detectQuality(url, context)
-                    └─► isDubbed(text)
-```
+- اگر `PUBLIC_URL` تنظیم شده باشد، همان استفاده می‌شود.
+- اگر تنظیم نشده باشد، origin از `req.protocol` و `Host` درخواست ساخته می‌شود.
+- مسیر لوگو همیشه `/assets/icons/logo.png` است.
 
 ---
 
-## ساختار داده خروجی
+## ساختار خروجی stream
 
-### Stream Object
+Stremio انتظار دارد پاسخ stream handler چنین ساختاری داشته باشد:
 
-```javascript
+```json
 {
-  name: "Persian_Streams\n1080p • Iranian Source • دوبله",
-  title: "S3E6 - 1080p\nPersian Subtitles",
-  url: "https://cdn.example.com/video/file.mkv"
+  "streams": [
+    {
+      "name": "1080p • دوبله",
+      "title": "S1E3 - 1080p",
+      "url": "https://cdn.example.com/video.mkv"
+    }
+  ]
 }
 ```
 
-| فیلد     | توضیح                                                                 |
-|----------|-----------------------------------------------------------------------|
-| `name`   | نام نمایشی در لیست استریم‌ها (شامل نام افزونه، کیفیت و وضعیت دوبله) |
-| `title`  | عنوان جزئی‌تر (شامل فصل/قسمت و کیفیت)                                |
-| `url`    | لینک مستقیم ویدیو (.mkv, .mp4, .m3u8)                                |
+### فیلدهای هر stream
+
+| فیلد | توضیح |
+|------|-------|
+| `name` | نام کوتاه قابل نمایش؛ در کد فعلی معمولاً کیفیت و برچسب دوبله است. |
+| `title` | توضیح تکمیلی؛ برای سریال شامل `S{season}E{episode}` و کیفیت است. |
+| `url` | لینک مستقیم یا قابل پخش توسط Stremio. |
+
+### نمونه‌های واقعی بر اساس کد فعلی
+
+فیلم معمولی:
+
+```js
+{
+  name: "1080p",
+  title: "1080p",
+  url: "https://example.com/movie-1080.mkv"
+}
+```
+
+فیلم دوبله:
+
+```js
+{
+  name: "720p • دوبله",
+  title: "720p",
+  url: "https://example.com/movie-dubbed-720.mp4"
+}
+```
+
+قسمت سریال:
+
+```js
+{
+  name: "480p",
+  title: "S1E8 - 480p",
+  url: "https://example.com/series-s01e08-480.mp4"
+}
+```
+
+iframe فیلم:
+
+```js
+{
+  name: "Stream",
+  title: "Embedded Stream",
+  url: "https://example.com/playlist.m3u8"
+}
+```
+
+---
+
+## نمونه درخواست‌ها
+
+فرض کنید سرور روی پورت `8000` اجرا شده است.
+
+### بررسی manifest
+
+```bash
+curl http://localhost:8000/manifest.json
+```
+
+### درخواست stream فیلم
+
+```bash
+curl http://localhost:8000/stream/movie/tt1234567.json
+```
+
+### درخواست stream سریال
+
+```bash
+curl http://localhost:8000/stream/series/tt1234567:1:3.json
+```
+
+### بررسی لوگو
+
+```bash
+curl -I http://localhost:8000/assets/icons/logo.png
+```
+
+---
+
+## نکات استقرار
+
+برای اجرای عمومی افزونه:
+
+1. سرویس باید Node.js `20.18.1+` داشته باشد.
+2. `BASE_URL` باید در محیط اجرا تعریف شود.
+3. اگر سرویس پشت دامنه عمومی است، `PUBLIC_URL` را تنظیم کنید.
+4. پورت باید از متغیر `PORT` میزبان خوانده شود؛ کد این کار را انجام می‌دهد.
+5. مسیرهای زیر باید از بیرون قابل دسترسی باشند:
+
+   ```text
+   /manifest.json
+   /stream/movie/{imdbId}.json
+   /stream/series/{imdbId}:{season}:{episode}.json
+   /assets/icons/logo.png
+   ```
+
+6. برای نصب در Stremio از آدرس زیر استفاده کنید:
+
+   ```text
+   stremio://YOUR_DOMAIN/manifest.json
+   ```
+
+### نکته درباره `PUBLIC_URL`
+
+اگر `addon.js` مستقیماً با Express همین پروژه اجرا شود و `PUBLIC_URL` تنظیم نشده باشد، route سفارشی manifest از Host درخواست استفاده می‌کند و معمولاً لوگو درست ساخته می‌شود.
+
+اما اگر `addonInterface` توسط یک سرویس دیگر import و serve شود، بهتر است `PUBLIC_URL` حتماً تنظیم شود؛ چون manifest اولیه در زمان ساخت از مقدار `PUBLIC_URL` یا fallback لوکال استفاده می‌کند.
+
+---
+
+## محدودیت‌ها و نکات نگهداری
+
+- افزونه فقط stream provider است و catalog، meta، subtitle یا addon setting ارائه نمی‌کند.
+- تطبیق محتوا فقط با `quick-search` و IMDb ID انجام می‌شود؛ fallback مبتنی بر عنوان یا slug در نسخه فعلی وجود ندارد.
+- منبع باید endpoint زیر را داشته باشد و پاسخ آن آرایه JSON باشد:
+
+  ```text
+  /quick-search?q={imdbId}&sort=modified_at%3Adesc
+  ```
+
+- تغییر ساختار HTML منبع می‌تواند extractorها را از کار بیندازد؛ selectorهای حساس:
+
+  ```css
+  .download-season
+  button[data-bs-toggle="collapse"]
+  .series-downloaditems .d-flex
+  a.btn-block.btn-default
+  .download-list, .download-box, .dl-box
+  a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]
+  iframe[src]
+  ```
+
+- map فصل‌های فارسی فعلاً تا `دهم` را به صورت کلمه‌ای پوشش می‌دهد؛ فصل‌های بالاتر در صورت داشتن عدد، با regex عددی تشخیص داده می‌شوند.
+- تشخیص کیفیت heuristic است و به نام فایل، URL یا متن باکس دانلود وابسته است.
+- در extractor سریال، fallback فعلی `href.includes('http')` می‌تواند لینک مطلق غیر ویدیویی را هم بپذیرد؛ اگر منبع HTML تغییر کند، بهتر است این شرط محدودتر شود.
+- cache، rate limiting و تست خودکار در نسخه فعلی وجود ندارد.
+- `player-fa.png` در حال حاضر در manifest استفاده نشده، اما به دلیل static serving از مسیر `/assets/icons/player-fa.png` قابل دریافت است.
 
 ---
 
 ## عیب‌یابی
 
-### هیچ استریمی پیدا نشد
-- آیا `BASE_URL` در `.env` تنظیم شده؟
-- آیا شناسه IMDb در سایت منبع وجود دارد؟
-- لاگ سرور را بررسی کنید — مراحل جستجو نمایش داده می‌شوند
+### خطای `BASE_URL is not set`
 
-### لوگو نمایش داده نمی‌شود
-- آیا فایل `assets/icons/logo.png` وجود دارد؟
-- آیا URL لوگو در منیفست مطلق است؟ (`http://...`)
+علت: متغیر `BASE_URL` تعریف نشده است.
 
-### خطای Connection Refused
-- آیا سرور در حال اجراست؟ (`node addon.js`)
-- آیا پورت آزاد است؟
+راه‌حل:
 
-### کیفیت نامشخص نمایش داده می‌شود
-- URL ویدیو ممکن است شامل اطلاعات کیفیت نباشد
-- `detectQuality` فقط متن‌های شناخته شده را تشخیص می‌دهد
+```env
+BASE_URL=https://www.example.com
+```
+
+سپس برنامه را دوباره اجرا کنید.
+
+---
+
+### quick-search نتیجه نمی‌دهد
+
+موارد زیر را بررسی کنید:
+
+- آیا `BASE_URL` درست است؟
+- آیا endpoint زیر در منبع پاسخ می‌دهد؟
+
+  ```text
+  {BASE_URL}/quick-search?q=tt1234567&sort=modified_at%3Adesc
+  ```
+
+- آیا پاسخ JSON آرایه است؟
+- آیا در آیتم‌های پاسخ، فیلد `imdb_id` وجود دارد؟
+- آیا مقدار `imdb_id` دقیقاً با شناسه درخواستی برابر است؟
+
+---
+
+### صفحه محتوا parse نمی‌شود
+
+`fetchPage` فقط status `200` و پاسخ رشته‌ای HTML را می‌پذیرد. اگر منبع redirect غیرمنتظره، JSON، صفحه خطا یا HTML محافظت‌شده برگرداند، خروجی stream خالی خواهد شد.
+
+---
+
+### برای فیلم stream پیدا نمی‌شود
+
+selectorهای باکس دانلود را بررسی کنید:
+
+```css
+.download-list, .download-box, .dl-box
+```
+
+و مطمئن شوید لینک‌ها شامل `.mkv`، `.mp4` یا `abrtech` هستند، یا URL واقعی در `handleDownloadClick(...)` قرار دارد.
+
+---
+
+### برای سریال قسمت درست پیدا نمی‌شود
+
+موارد زیر را بررسی کنید:
+
+- متن فصل شامل `فصل 2`، `Season 2` یا یکی از نام‌های فارسی مثل `دوم` باشد.
+- متن قسمت شامل `قسمت 5`، `Episode 5` یا `Ep 5` باشد.
+- اگر متن قسمت عدد ندارد، لینک دارای query مثل `?episode=5` باشد.
+- ساختار HTML همچنان شامل `.download-season` و `.series-downloaditems .d-flex` باشد.
+
+---
+
+### لوگو در Stremio نمایش داده نمی‌شود
+
+- فایل `assets/icons/logo.png` باید وجود داشته باشد.
+- مسیر `/assets/icons/logo.png` باید از بیرون قابل دسترسی باشد.
+- در deploy عمومی، `PUBLIC_URL` را روی origin نهایی تنظیم کنید.
+
+---
+
+### `/health` جواب نمی‌دهد
+
+در کد فعلی route سلامت (`/health`) تعریف نشده است. برای health check در سرویس‌های میزبانی می‌توانید فعلاً از `/manifest.json` استفاده کنید یا route جدیدی در Express اضافه کنید.
+
+---
+
+## حمایت از پروژه
+
+اگر این افزونه برایت مفید بوده، حمایت تو کمک می‌کند پروژه پایدارتر، تمیزتر و هماهنگ‌تر با تغییرات منابع ایرانی باقی بماند ❤️
+
+```text
+alirostami.com/support
+```
+
+با هر حمایت، انگیزه ادامه توسعه، نگهداری و بهبود تجربه کاربران فارسی‌زبان Stremio بیشتر می‌شود.
