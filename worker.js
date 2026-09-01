@@ -3,9 +3,8 @@ import { httpServerHandler } from "cloudflare:node";
 import express from "express";
 import { createRequire } from "node:module";
 
-// The existing addon module reads BASE_URL during module initialization.
-// Workers exposes environment bindings through `env`, so mirror the binding
-// into process.env before loading the CommonJS addon module.
+// The legacy addon module reads BASE_URL during module initialization.
+// Mirror the Worker environment binding into process.env before loading it.
 process.env.BASE_URL = env.BASE_URL;
 
 const require = createRequire(import.meta.url);
@@ -14,8 +13,7 @@ const { getRouter } = require("stremio-addon-sdk");
 
 const app = express();
 
-// Stremio requires an absolute logo URL in the manifest. The existing addon
-// uses a relative asset path, so rewrite it for the /streams deployment path.
+// Stremio requires an absolute logo URL in the manifest.
 app.get("/streams/manifest.json", (req, res) => {
   const protocol = req.get("x-forwarded-proto") || req.protocol || "https";
   const host = req.get("host");
@@ -30,13 +28,12 @@ app.get("/streams/manifest.json", (req, res) => {
   res.end(JSON.stringify(manifest));
 });
 
-// Serve existing static assets through Workers Static Assets.
-// The asset collection is configured at the repository's ./assets directory.
-app.get("/streams/assets/*", async (req, res) => {
-  const assetPath = req.path.replace(/^\/streams/, "") || "/";
+// Serve files from the repository's ./assets directory through the Workers
+// Static Assets binding. /assets/icons/logo.png maps to ./assets/icons/logo.png.
+app.get("/streams/assets/*", async (_req, res) => {
+  const assetPath = _req.path.replace(/^\/streams\/assets/, "") || "/";
   const assetRequest = new Request(`https://assets.local${assetPath}`, {
-    method: req.method,
-    headers: req.headers,
+    method: "GET",
   });
 
   const assetResponse = await env.ASSETS.fetch(assetRequest);
@@ -46,9 +43,8 @@ app.get("/streams/assets/*", async (req, res) => {
   res.end(Buffer.from(await assetResponse.arrayBuffer()));
 });
 
-// The official Stremio SDK returns an Express router. Mounting it under
-// /streams keeps the existing addon routes unchanged internally while making
-// the public addon URL: /streams/manifest.json and /streams/stream/...
+// The SDK returns an Express router. Mount it under /streams so public URLs
+// become /streams/manifest.json and /streams/stream/...
 app.use("/streams", getRouter(addonInterface));
 
 app.get("/streams", (_req, res) => {
@@ -63,8 +59,7 @@ app.get("/", (_req, res) => {
   });
 });
 
-// Cloudflare Workers provides the Node.js HTTP server bridge used here.
-// The port is an internal routing key, not a public listening port.
+// Internal port used by Cloudflare's Node.js HTTP bridge.
 app.listen(8787);
 
 export default httpServerHandler({ port: 8787 });
