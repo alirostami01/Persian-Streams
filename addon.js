@@ -1,12 +1,12 @@
 /**
  * Persian Streams - Stremio Addon
- * 
+ *
  * Scrapes streaming links from the source configured via BASE_URL (in .env)
  * for movies and TV series. This is an Iranian source providing content with
  * Persian subtitles.
- * 
- * The site uses title-based URLs (e.g., /series/house-of-the-dragon/)
- * so we fetch the title from Stremio's metadata service and convert it to a slug.
+ *
+ * Content is resolved by IMDB id through the site's quick-search endpoint,
+ * which returns the canonical URL for both movies and series.
  */
 
 const express = require('express');
@@ -38,9 +38,17 @@ const client = axios.create({
   validateStatus: status => status < 500
 });
 
-// Logo is served as a static file by the HTTP server (see serveHTTP static
-// option below), so it is referenced by a URL instead of being embedded.
-const LOGO = '/assets/icons/logo.png';
+// Logo is served as a static file by the HTTP server (see the express.static
+// mount below), so it is referenced by a URL instead of being embedded.
+//
+// Stremio requires ABSOLUTE URLs for manifest images. PUBLIC_URL (optional, in
+// .env) is the externally reachable origin of this addon; when it is set the
+// manifest carries a correct absolute URL even for consumers that import this
+// module directly. When it is not set we fall back to the local origin, and the
+// /manifest.json route below rewrites the logo per-request from the Host header.
+const LOGO_PATH = '/assets/icons/logo.png';
+const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+const LOGO = `${PUBLIC_URL}${LOGO_PATH}`;
 
 // Initialize addon builder with manifest
 const builder = new addonBuilder({
@@ -56,33 +64,6 @@ const builder = new addonBuilder({
   author: 'Ali Rostami rostami.ali@gmail.com',
   logo: LOGO
 });
-
-/**
- * Fetch metadata title from Stremio's meta endpoint using IMDB ID
- */
-async function fetchTitleFromMeta(type, imdbId) {
-  try {
-    // Stremio meta endpoint format: https://v3-cinemeta.strem.io/meta/<type>/<imdbId>.json
-    const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
-    const response = await axios.get(metaUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 5000
-    });
-
-    if (response.data && response.data.meta && response.data.meta.name) {
-      return {
-        name: response.data.meta.name,
-        year: response.data.meta.year || null
-      };
-    }
-    return null;
-  } catch (error) {
-    console.log(`Failed to fetch metadata for ${imdbId}: ${error.message}`);
-    return null;
-  }
-}
 
 /**
  * Resolve the real content URL via the site's quick-search endpoint using the
@@ -136,6 +117,10 @@ async function fetchPage(url) {
       console.log(`Failed to fetch: Status ${response.status}`);
       return null;
     }
+    if (!response.data || typeof response.data !== 'string') {
+      console.log(`Empty or non-HTML response for ${url}`);
+      return null;
+    }
     return cheerio.load(response.data);
   } catch (error) {
     console.error(`Fetch error for ${url}:`, error.message);
@@ -147,24 +132,40 @@ async function fetchPage(url) {
  * Detect video quality from URL and text
  */
 function detectQuality(url, context = '') {
-  const combined = (url + ' ' + context).toLowerCase();
+  // Decode once up front so percent-encoded values (e.g. ?quality=%31%30%38%30)
+  // are matched by the same checks as plain text. decodeURIComponent throws on
+  // malformed sequences, so fall back to the raw string.
+  let decodedUrl = url || '';
+  try {
+    decodedUrl = decodeURIComponent(decodedUrl);
+  } catch (error) {
+    // Malformed escape sequence - keep the raw URL.
+  }
+
+  const combined = (decodedUrl + ' ' + context).toLowerCase();
 
   if (combined.includes('2160') || combined.includes('4k') || combined.includes('uhd')) return '4K';
   if (combined.includes('1080') || combined.includes('full hd') || combined.includes('fhd')) return '1080p';
-  if (combined.includes('720') || combined.includes('hd')) return '720p';
-  if (combined.includes('480') || combined.includes('sd')) return '480p';
+  // Match a standalone "hd"/"sd" token only, so arbitrary CDN hashes containing
+  // those letters are not misread as a quality marker.
+  if (combined.includes('720') || /\bhd\b/i.test(combined)) return '720p';
+  if (combined.includes('480') || /\bsd\b/i.test(combined)) return '480p';
   if (combined.includes('360')) return '360p';
 
-  const qualityParam = url.match(/[?&]quality=([^&]*)/i);
-  if (qualityParam) {
-    const q = decodeURIComponent(qualityParam[1]).toLowerCase();
-    if (q.includes('2160') || q.includes('4k')) return '4K';
-    if (q.includes('1080')) return '1080p';
-    if (q.includes('720')) return '720p';
-    if (q.includes('480')) return '480p';
-  }
-
   return 'Unknown';
+}
+
+/**
+ * Convert Persian (\u06F0-\u06F9) and Arabic-Indic (\u0660-\u0669) digits to
+ * ASCII so numeric captures can be parsed with parseInt.
+ * @param {string} text
+ * @returns {string} text with all digits normalised to ASCII
+ */
+function normalizeDigits(text) {
+  if (!text) return '';
+  return text
+    .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06F0))
+    .replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660));
 }
 
 /**
@@ -196,6 +197,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
     const $seasonEl = $(seasonEl);
     const button = $seasonEl.find('button[data-bs-toggle="collapse"]').first();
     const buttonText = button.text();
+    const buttonTextNorm = normalizeDigits(buttonText);
 
     // Determine season number from Persian or English text
     let seasonNum = seasonIdx + 1;
@@ -212,7 +214,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       }
     }
 
-    const digitSeasonMatch = buttonText.match(/(?:season|fصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+    const digitSeasonMatch = buttonTextNorm.match(/(?:season|فصل)\s*(\d+)/i);
     if (digitSeasonMatch) {
       seasonNum = parseInt(digitSeasonMatch[1], 10);
     }
@@ -227,13 +229,14 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       const $epEl = $(epEl);
       const epLink = $epEl.find('a.btn-block.btn-default').first();
       const epText = epLink.text().trim();
+      const epTextNorm = normalizeDigits(epText);
       let epNum = epIdx + 1;
 
-      const persianEpMatch = epText.match(/(?:قسمت)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+      const persianEpMatch = epTextNorm.match(/(?:قسمت)\s*(\d+)/i);
       if (persianEpMatch) {
         epNum = parseInt(persianEpMatch[1], 10);
       } else {
-        const englishEpMatch = epText.match(/(?:episode|ep)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+        const englishEpMatch = epTextNorm.match(/(?:episode|ep)\s*(\d+)/i);
         if (englishEpMatch) {
           epNum = parseInt(englishEpMatch[1], 10);
         } else {
@@ -251,15 +254,16 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
 
       let videoUrl = null;
 
-      // Strategy 1: onclick handler
-      const onclickBtn = $epEl.find('a[onclick]').first();
-      if (onclickBtn.length > 0) {
-        const onclick = onclickBtn.attr('onclick');
+      // Strategy 1: scan every onclick handler in the episode row for a
+      // handleDownloadClick(...) URL, taking the first one that parses.
+      $epEl.find('a[onclick]').each((_, aEl) => {
+        if (videoUrl) return false;
+        const onclick = $(aEl).attr('onclick');
         if (onclick) {
           const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
           if (urlMatch) videoUrl = urlMatch[1];
         }
-      }
+      });
 
       // Strategy 2: Direct href
       if (!videoUrl) {
@@ -269,27 +273,16 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
         }
       }
 
-      // Strategy 3: Check sibling elements
-      if (!videoUrl) {
-        $epEl.find('a[onclick]').each((_, aEl) => {
-          const onclick = $(aEl).attr('onclick');
-          if (onclick && !videoUrl) {
-            const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-            if (urlMatch) videoUrl = urlMatch[1];
-          }
-        });
-      }
-
       if (videoUrl) {
         const quality = detectQuality(videoUrl, buttonText + ' ' + epText);
         // Check if the content is dubbed based on episode text and video URL
-        const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? ' • دوبله' : '';
+        const dubbedLabel = isDubbed(epText + ' ' + videoUrl) ? '• دوبله' : '';
         streams.push({
-          name: `${quality} ${dubbedLabel}`,
+          name: `${quality}${dubbedLabel ? ` ${dubbedLabel}` : ''}`.trim(),
           title: `S${targetSeason}E${targetEpisode} - ${quality}`,
           url: videoUrl
         });
-        console.log(`Added stream: ${quality}${dubbedLabel}`);
+        console.log(`Added stream: ${quality}${dubbedLabel ? ` ${dubbedLabel}` : ''}`);
       }
     });
   });
@@ -308,7 +301,7 @@ function extractMovieStreams($) {
     const $box = $(box);
     const qualityLabel = $box.find('.title span').first().text() || '';
 
-    $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="http"]').each((_, el) => {
+    $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]').each((_, el) => {
       const href = $(el).attr('href');
       const text = $(el).text().trim();
 
@@ -323,9 +316,9 @@ function extractMovieStreams($) {
 
         const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
         // Check if the content is dubbed based on text and video URL
-        const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? ' • دوبله' : '';
+        const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? '• دوبله' : '';
         streams.push({
-          name: `${quality} ${dubbedLabel}`,
+          name: `${quality}${dubbedLabel ? ` ${dubbedLabel}` : ''}`.trim(),
           title: `${quality}`,
           url: videoUrl
         });
@@ -354,16 +347,17 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   console.log('\n=== Stream Request ===');
   console.log(`Type: ${type}, IMDB: ${imdbId}, Season: ${season}, Episode: ${episode}`);
 
-  // Resolve the metadata title (and year) from Stremio's cinemeta service.
-  const meta = await fetchTitleFromMeta(type, imdbId);
-  const title = meta ? meta.name : null;
-  const year = meta ? meta.year : null;
+  const contentUrl = await resolveViaQuickSearch(imdbId);
+  if (!contentUrl) {
+    console.log('No content URL resolved, aborting');
+    return [];
+  }
 
-  let contentUrl = null;
-
-  contentUrl = await resolveViaQuickSearch(imdbId);
-
-  let $ = await fetchPage(contentUrl);
+  const $ = await fetchPage(contentUrl);
+  if (!$) {
+    console.log('Failed to load content page, aborting');
+    return [];
+  }
 
   let streams = [];
   if (type === 'series' && season !== null && episode !== null) {
@@ -403,33 +397,36 @@ builder.defineStreamHandler((args) => {
 });
 
 // Export addon interface
-module.exports = builder.getInterface();
+const addonInterface = builder.getInterface();
+module.exports = addonInterface;
 
 // Start server if run directly
 if (require.main === module) {
   const { getRouter } = require('stremio-addon-sdk');
-  const addonInterface = builder.getInterface();
 
   const app = express();
 
   // Override the manifest route to inject an absolute logo URL.
-  // Stremio requires absolute URLs for images in the manifest.
+  // Stremio requires absolute URLs for images in the manifest. An explicit
+  // PUBLIC_URL always wins; otherwise derive the origin from the request so the
+  // addon works behind any host without configuration.
   app.get('/manifest.json', (req, res) => {
-    const protocol = req.protocol || 'http';
-    const host = req.get('host') || `localhost:${PORT}`;
+    const origin = process.env.PUBLIC_URL
+      ? PUBLIC_URL
+      : `${req.protocol}://${req.get('host') || `localhost:${PORT}`}`;
     const manifestWithLogo = {
       ...addonInterface.manifest,
-      logo: `${protocol}://${host}/assets/icons/logo.png`
+      logo: `${origin}${LOGO_PATH}`
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.end(JSON.stringify(manifestWithLogo));
   });
 
-  app.use(getRouter(addonInterface));
-
-  // Serve the addon logo and other assets from the same origin so the manifest
-  // can reference them by a relative URL (Stremio manifest size limit is 8kb).
+  // Serve the addon logo and other assets from the same origin. Mounted BEFORE
+  // the SDK router so asset requests are never swallowed by it.
   app.use('/assets/icons', express.static(path.join(__dirname, 'assets', 'icons')));
+
+  app.use(getRouter(addonInterface));
 
   app.get('/', (_, res) => {
     res.setHeader('content-type', 'text/html; charset=utf-8');
