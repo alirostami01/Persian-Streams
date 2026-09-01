@@ -1,360 +1,316 @@
 # Unused / Dead / Redundant Code Report
 
-**Repository:** `alirostami01/iranian-provider-media` (Persian Streams — Stremio addon)
-**Analysis date:** 2026-09-01
-**Scope analysed:** every non-ignored file in the repo.
+**Repository:** `alirostami01/iranian-provider-media` (Persian Streams — Stremio Addon)
+**Analysis Date:** 2026-09-01
+**Commit Base:** `2e61a0f70855e8bff529e84ce2e08a175569979b` + working branch `arena/01a05b6f-iranian-provider-media`
+**Analyser:** Static reading of all non-ignored files + grep cross-reference
+**Scope:** `addon.js` (451 lines, single JS module), `package.json`, `assets/`, `docs/`, `README.md`
 
-## 0. Project inventory
-
-The project is a single-module Node.js application. There is no build step, no test suite and no
-transpiler, so all reachability below is determined by direct source reading plus grep-based
-cross-referencing.
-
-| Path | Type | Status |
-| --- | --- | --- |
-| `addon.js` (453 lines) | Application source — **the only JavaScript file** | Analysed in full |
-| `package.json` / `package-lock.json` | Manifest | Analysed (dependency usage) |
-| `README.md`, `docs/DOCUMENTATION.md` | Docs | Cross-referenced only |
-| `assets/icons/logo.png` | Asset | Referenced |
-| `assets/icons/player-fa.png` | Asset | **Unreferenced** (see 4.2) |
-| `.gitignore` | Config | Fine (`.env`, `node_modules/`) |
-
-Because there is exactly one module, there are no unused `require`s of local files and no orphaned
-helper modules other than the item noted in section 4.
+> This report **overwrites** any previous `UNUSED_CODE_REPORT.md` in the repo. The previous version referenced functions like `fetchTitleFromMeta`, `searchSite`, `slugifyTitle` that no longer exist in current `addon.js` (as of this analysis). This version reflects the **current** codebase.
 
 ---
 
-## 1. Dead / effectively-unused code
+## 0. Project Inventory
 
-### 1.1 `fetchTitleFromMeta()` — result never used (dead function)
+| Path | Lines / Type | Usage |
+|------|--------------|-------|
+| `addon.js` | 451 lines, CommonJS | Only JS source file, entry point and library export |
+| `package.json` | 26 lines | 5 deps: axios, cheerio, dotenv, express, stremio-addon-sdk – all used |
+| `assets/icons/logo.png` | binary | Referenced in manifest (`LOGO_PATH`, `LOGO`, `/manifest.json` route, static serve) |
+| `assets/icons/player-fa.png` | binary | **Zero references** in code, docs, or manifest – see 4.1 |
+| `docs/DOCUMENTATION.md` | ~600 lines, Persian | Documents deleted functions – see 4.2 |
+| `README.md` | docs | Up to date |
+| `.gitignore` | config | Ignores `.env`, `node_modules/` – correct |
 
-- **File Path & Line Numbers:** `addon.js` (Lines 60–85, consumed at 358–360)
-- **Code Snippet / Identifier:** `async function fetchTitleFromMeta(type, imdbId)`
-- **Category:** Dead Function / Unused Network Call
-- **Reasoning & Explanation:** The function is called exactly once, in `getStreams()`:
-  ```js
-  const meta = await fetchTitleFromMeta(type, imdbId);
-  const title = meta ? meta.name : null;   // never read afterwards
-  const year  = meta ? meta.year : null;   // never read afterwards
-  ```
-  Neither `title` nor `year` is referenced anywhere else in the file (verified by grep: the only
-  other occurrences of `title` are the unrelated `title:` keys of the stream objects and the
-  `.title span` CSS selector). Content resolution is done purely by IMDB id through
-  `resolveViaQuickSearch()` (Line 364). The file header comment ("we fetch the title from Stremio's
-  metadata service and convert it to a slug") documents a slug-based strategy that no longer exists
-  in the code — the slug conversion helper it refers to has already been removed, leaving this
-  fetch behind as a leftover.
-- **Safety / Dependency Note:** Removing it is behaviourally safe but has a **positive** side
-  effect: it eliminates one blocking HTTPS round-trip (5 s timeout) to
-  `v3-cinemeta.strem.io` on every single stream request. Keep it only if a title-based fallback
-  resolver is planned; in that case wire it up rather than leaving it dormant.
-
-### 1.2 Unused local variables `title` and `year`
-
-- **File Path & Line Numbers:** `addon.js` (Lines 359–360)
-- **Code Snippet / Identifier:** `const title = ...`, `const year = ...`
-- **Category:** Unused Variable
-- **Reasoning & Explanation:** Assigned once, read zero times. Any linter with
-  `no-unused-vars` enabled flags both.
-- **Safety / Dependency Note:** None. Pure locals, not exported, not captured in a closure.
-
-### 1.3 Redundant initialisation of `contentUrl`
-
-- **File Path & Line Numbers:** `addon.js` (Lines 362–364)
-- **Code Snippet / Identifier:**
-  ```js
-  let contentUrl = null;
-
-  contentUrl = await resolveViaQuickSearch(imdbId);
-  ```
-- **Category:** Redundant Assignment / Dead Store
-- **Reasoning & Explanation:** The `null` initialiser is overwritten on the very next executed
-  statement with no intervening read or branch, so the store is dead. The `let` + separate
-  assignment shape is a remnant of an earlier multi-strategy resolver (quick-search → slug →
-  search page); with a single strategy left it collapses to
-  `const contentUrl = await resolveViaQuickSearch(imdbId);`.
-- **Safety / Dependency Note:** Safe. Note the related latent bug in 3.4 before touching this area.
-
-### 1.4 Duplicate `builder.getInterface()` call
-
-- **File Path & Line Numbers:** `addon.js` (Lines 406 and 411)
-- **Code Snippet / Identifier:** `module.exports = builder.getInterface();` … `const addonInterface = builder.getInterface();`
-- **Category:** Redundant Code
-- **Reasoning & Explanation:** The interface is built twice within the same process. Line 411 could
-  simply reuse `module.exports`. Additionally, the export on Line 406 is **effectively an
-  unreachable export**: no file in the repository `require()`s `addon.js` (it is only ever the
-  process entry point via `"main": "addon.js"` / `npm start`), so the exported interface has no
-  in-repo consumer.
-- **Safety / Dependency Note:** **Do not delete the export.** It is the conventional public surface
-  of a Stremio addon and is what allows the module to be embedded by an external host or by
-  `stremio-addon-sdk`'s `serveHTTP`. Only the duplicated *call* on Line 411 is safely collapsible.
+No test suite, no build step, no transpiler, no additional helper modules. No `node_modules/` checked in.
 
 ---
 
-## 2. Unreachable / dead logic branches
+## 1. Unused Variables, Constants, Parameters
 
-### 2.1 `quality=` query-parameter fallback in `detectQuality()` — unreachable
+### 1.1 Unused callback index parameters `_` in cheerio `.each()` loops
 
-- **File Path & Line Numbers:** `addon.js` (Lines 158–165)
+- **File Path & Line Numbers:** `addon.js` (Lines 259, 300, 304, 329)
+- **Code Snippet / Identifier:** `(_, aEl)`, `(_, box)`, `(_, el)`, `(_, iframe)` in:
+  ```js
+  $epEl.find('a[onclick]').each((_, aEl) => {
+  $('.download-list, .download-box, .dl-box').each((_, box) => {
+    $box.find('...').each((_, el) => {
+  $('iframe[src]').each((_, iframe) => {
+  ```
+- **Category:** Unused Parameter
+- **Reasoning & Explanation:** The first argument of cheerio's `each` is the numeric index. In all four sites the index is bound to `_` and never read. The element itself (`aEl`, `box`, `el`, `iframe`) is the only used value. This is a conventional jQuery/cheerio pattern, not a bug, but a strict `no-unused-vars` lint would flag it. Same pattern appears at line 431 `app.get('/', (_, res) => {` where `_` is the unused `req` object – though `req` is intentionally ignored for the root page.
+- **Safety / Dependency Note:** Safe to keep. If removed, you would change to `.each((i, el) =>` or `.each(function() { ... })` style. No runtime side effects. Renaming `_` to `_idx` or prefixing with underscore silences linters.
+
+### 1.2 Default parameter `context = ''` in `detectQuality` never exercised
+
+- **File Path & Line Numbers:** `addon.js` (Line 134)
+- **Code Snippet / Identifier:** `function detectQuality(url, context = '')`
+- **Category:** Unused Default / Dead Default Branch
+- **Reasoning & Explanation:** Both call sites pass an explicit second argument:
+  - Line 277: `detectQuality(videoUrl, buttonText + ' ' + epText)`
+  - Line 317: `detectQuality(videoUrl, qualityLabel + ' ' + text)`
+  Therefore the `= ''` default is never evaluated in current code. It is not dead code per se, but an API affordance that is currently unexercised. The function's own comment says it decodes percent-encoded URLs, so the second arg is optional by design.
+- **Safety / Dependency Note:** Safe to keep – it makes the function robust if called elsewhere. Removing the default would not change behavior today, but would make future callers with single arg produce `"url undefined"` in `combined`. Low risk either way.
+
+### 1.3 Error variable shadowing / unused in catch comment
+
+- **File Path & Line Numbers:** `addon.js` (Lines 139-143)
 - **Code Snippet / Identifier:**
   ```js
-  const qualityParam = url.match(/[?&]quality=([^&]*)/i);
-  if (qualityParam) {
-    const q = decodeURIComponent(qualityParam[1]).toLowerCase();
-    if (q.includes('2160') || q.includes('4k')) return '4K';
-    if (q.includes('1080')) return '1080p';
-    if (q.includes('720'))  return '720p';
-    if (q.includes('480'))  return '480p';
+  try {
+    decodedUrl = decodeURIComponent(decodedUrl);
+  } catch (error) {
+    // Malformed escape sequence - keep the raw URL.
   }
   ```
-- **Category:** Unreachable Branch / Dead Logic
-- **Reasoning & Explanation:** `combined` (Line 150) is `url + ' ' + context` lower-cased, i.e. it
-  is a **superset** of the query-string being re-parsed here. Every token this block tests for
-  (`2160`, `4k`, `1080`, `720`, `480`) is already tested against `combined` on Lines 152–155, which
-  `return` first. Therefore any URL that would satisfy a condition inside this block has already
-  caused an early return, and control can only reach Lines 158–165 in the case where **none** of the
-  inner conditions can match either. The only theoretical escape hatch is a percent-encoded value
-  (e.g. `?quality=%31%30%38%30`) that `decodeURIComponent` would reveal — no such encoding is
-  produced by the scraped site, whose links are plain `.mkv`/`.mp4` paths. Net effect: the block can
-  only ever fall through to `return 'Unknown'`.
-- **Safety / Dependency Note:** Low risk to remove; the only behaviour lost is the exotic
-  percent-encoded case. A cheaper fix that preserves intent is to decode the URL *once* into
-  `combined` at the top of the function and drop this block entirely.
+- **Category:** Unused Variable (catch param)
+- **Reasoning & Explanation:** `error` is caught but never logged or inspected. This is intentional defensive code – malformed percent-encoding should not crash quality detection. However the variable is technically unused, which linters flag.
+- **Safety / Dependency Note:** Keep as-is, or use `catch {}` (Node 10+ supports optional catch binding) to silence lint. No side effects.
 
-### 2.2 "Strategy 3" onclick scan — duplicate of Strategy 1, never yields a new result
+---
 
-- **File Path & Line Numbers:** `addon.js` (Lines 272–281)
+## 2. Uncalled Functions, Methods, Dead Classes
+
+### 2.1 No dead functions – negative finding
+
+- **File Path & Line Numbers:** `addon.js` (Lines 76-404)
+- **Code Snippet / Identifier:** All 8 top-level functions
+- **Category:** N/A – Verified Live
+- **Reasoning & Explanation:** Cross-referenced each function:
+  - `resolveViaQuickSearch` → called at line 354 in `getStreams`
+  - `fetchPage` → called at line 359 in `getStreams`
+  - `detectQuality` → called at lines 277 and 317
+  - `normalizeDigits` → called at lines 200 and 232
+  - `isDubbed` → called at lines 279 and 319
+  - `extractSeriesStreams` → called at line 366
+  - `extractMovieStreams` → called at line 368
+  - `getStreams` → called at line 390 inside `defineStreamHandler`
+  No orphaned helpers remain (unlike older versions that had `fetchTitleFromMeta`, `slugifyTitle`, `searchSite`, `resolveViaEndpoint`).
+- **Safety / Dependency Note:** N/A
+
+### 2.2 No dead classes
+
+- **File Path & Line Numbers:** N/A
+- **Code Snippet / Identifier:** No `class` declarations in repo
+- **Category:** N/A
+- **Reasoning & Explanation:** Repo uses only functions and module-level constants.
+- **Safety / Dependency Note:** N/A
+
+---
+
+## 3. Unused Imports, Requires, and Unreachable Exports
+
+### 3.1 Conditional unused requires: `express` and `path` only used when run as CLI
+
+- **File Path & Line Numbers:** `addon.js` (Lines 12-13, used at Lines 407 and 427)
 - **Code Snippet / Identifier:**
   ```js
-  // Strategy 3: Check sibling elements
-  if (!videoUrl) {
-    $epEl.find('a[onclick]').each((_, aEl) => { ... handleDownloadClick ... });
+  const express = require('express');
+  const path = require('path');
+  // ...
+  if (require.main === module) {
+    const app = express();
+    app.use('/assets/icons', express.static(path.join(__dirname, 'assets', 'icons')));
   }
   ```
-- **Category:** Redundant / Dead Logic Branch
-- **Reasoning & Explanation:** Strategy 1 (Lines 254–262) already runs
-  `$epEl.find('a[onclick]').first()` over the *same* subtree with the *same*
-  `handleDownloadClick(...)` regex. Strategy 3 re-runs the identical query set. It can therefore
-  only produce a URL when the **first** matching `a[onclick]` lacks a parsable `onclick` while a
-  **later** sibling has one — a case the comment ("check sibling elements") anticipates but which
-  the selector cannot actually broaden, since Strategy 1 is a strict prefix of Strategy 3's
-  iteration. For every real page shape observed in the extractor's own selectors, Strategy 3 is a
-  no-op. The comment is also misleading: it never leaves `$epEl`, so it inspects descendants, not
-  siblings.
-- **Safety / Dependency Note:** Slight residual value in the "first element unparsable, second
-  parsable" edge case. **Recommended action: keep the loop, delete Strategy 1** (the loop subsumes
-  it) rather than the reverse — that removes the duplication without narrowing coverage.
+- **Category:** Unused Import (in library mode) / Conditional Dependency
+- **Reasoning & Explanation:** When `addon.js` is imported as a library (`require('./addon.js')`), `require.main !== module`, so the entire `if` block is skipped. In that mode `express` and `path` are loaded but never referenced. They are only used in CLI mode (`node addon.js`). This is a common Stremio addon pattern – export interface for hosting, but also runnable standalone. The `package.json` `main` is `addon.js`, so both modes are supported. Strictly, the requires are not unused, but they are **conditionally unused** depending on entry mode. The more precise optimization would be to move `require('express')` and `require('path')` inside the `if (require.main === module)` guard, matching how `getRouter` is lazily required at line 408.
+- **Safety / Dependency Note:** Low risk to move inside guard – reduces cold-start memory when imported. However `express` is still a declared dependency and needed for CLI mode. Do not remove from `package.json`. Moving requires inside guard is safe, but keep top-level requires if you want to fail fast on missing dependency even in library mode.
 
-### 2.3 Corrupted Persian season regex — one alternative can never match
+### 3.2 No unused npm dependencies
 
-- **File Path & Line Numbers:** `addon.js` (Line 215)
-- **Code Snippet / Identifier:** `buttonText.match(/(?:season|fصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i)`
-- **Category:** Dead Logic / Mojibake Literal
-- **Reasoning & Explanation:** The second alternative is `fصل` — a **Latin `f`** followed by the
-  Persian letters `صل`. The intended word is clearly `فصل` ("season"). No Persian page will ever
-  emit the mixed-script sequence `fصل`, so that half of the alternation is unreachable. In practice
-  season detection relies entirely on the `persianNumbers` map (Lines 203–213) and the English
-  `season` alternative.
-- **Safety / Dependency Note:** This is a **latent bug, not merely dead code**. Fixing it (`fصل` →
-  `فصل`) would *activate* a code path that currently never runs and could change which season
-  container matches on sites that write "فصل 2". Treat as a behaviour change, not a cleanup — test
-  against a live page before altering.
+- **File Path & Line Numbers:** `package.json` (Lines 18-24)
+- **Code Snippet / Identifier:** `axios`, `cheerio`, `dotenv`, `express`, `stremio-addon-sdk`
+- **Category:** N/A – Verified Live
+- **Reasoning & Explanation:** All five are referenced:
+  - `axios` → `client` instance line 28
+  - `cheerio` → `cheerio.load` lines 124, etc.
+  - `dotenv` → `require('dotenv').config()` line 17
+  - `express` → lines 407, 427, 431, 429
+  - `stremio-addon-sdk` → `addonBuilder` line 16 and `getRouter` line 408
+- **Safety / Dependency Note:** N/A
 
-### 2.4 Character-class range in the same regexes is inert
+### 3.3 Export `module.exports = addonInterface` is live
 
-- **File Path & Line Numbers:** `addon.js` (Lines 215, 232, 236)
-- **Code Snippet / Identifier:** `[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)`
-- **Category:** Redundant Pattern
-- **Reasoning & Explanation:** The class permits Persian/Arabic-Indic digits as *separators*, but
-  the capture group `(\d+)` only accepts ASCII digits, and `parseInt` is then applied to the ASCII
-  result. So a page that writes "قسمت ۱۲" entirely in Persian digits matches nothing at all, and the
-  Persian-digit ranges in the separator class never contribute to a successful match — they can only
-  ever skip digits immediately preceding an ASCII number, which does not occur.
-- **Safety / Dependency Note:** Harmless if left. If Persian-digit episode numbers need supporting,
-  this requires a real normalisation helper, not a deletion.
-
-### 2.5 `'hd'` / `'sd'` substring checks are shadowed and over-broad
-
-- **File Path & Line Numbers:** `addon.js` (Lines 154–155)
-- **Code Snippet / Identifier:** `combined.includes('hd')`, `combined.includes('sd')`
-- **Category:** Partially Dead Condition
-- **Reasoning & Explanation:** `'hd'` is a substring of `uhd` and `fhd`, both of which return on
-  Lines 152–153 first — so the `'hd'` test can only ever fire on a bare `hd` token, never via those
-  two. It is simultaneously over-broad: any URL containing the letters `hd` anywhere (including
-  inside a random CDN hash) is silently classified `720p`. The `'sd'` test has the same weakness.
-- **Safety / Dependency Note:** Do not delete outright — the bare-`hd` case is real. Tighten with
-  word boundaries (`/\bhd\b/`) instead.
-
-### 2.6 `href*="http"` selector is neutralised by the following guard
-
-- **File Path & Line Numbers:** `addon.js` (Lines 311–315)
-- **Code Snippet / Identifier:**
-  ```js
-  $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="http"]').each((_, el) => {
-    ...
-    if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('abrtech'))) {
-  ```
-- **Category:** Redundant Selector / Dead Filter Clause
-- **Reasoning & Explanation:** The third selector `a[href*="http"]` widens the match set to every
-  absolute link in the box, but the immediately following `if` discards everything that is not
-  `.mkv`, `.mp4` or `abrtech`. Since the first two selectors already capture `.mkv`/`.mp4`, the only
-  elements the third selector uniquely contributes are `abrtech` links that happen to be absolute —
-  which an `a[href*="abrtech"]` selector would express directly. As written the selector does extra
-  DOM work for a set that is then almost entirely thrown away.
-- **Safety / Dependency Note:** Replacing `a[href*="http"]` with `a[href*="abrtech"]` is
-  behaviour-preserving for all inputs except relative `abrtech` links (which would then also be
-  caught — a strict improvement). Low risk.
-
-### 2.7 `req.protocol` / `req.get('host')` fallbacks are unreachable under Express
-
-- **File Path & Line Numbers:** `addon.js` (Lines 418–419)
-- **Code Snippet / Identifier:** `req.protocol || 'http'`, `req.get('host') || \`localhost:${PORT}\``
-- **Category:** Dead Defensive Branch
-- **Reasoning & Explanation:** Express always populates `req.protocol` (it defaults to `'http'`
-  internally), so the `|| 'http'` right-hand side is unreachable. `req.get('host')` is absent only
-  for a malformed HTTP/1.0 request with no `Host` header, which Node's HTTP server and any real
-  Stremio client never produce.
-- **Safety / Dependency Note:** Cheap and harmless defensive code. Flagged for completeness;
-  removal is optional and gains nothing.
+- **File Path & Line Numbers:** `addon.js` (Line 405)
+- **Code Snippet / Identifier:** `module.exports = addonInterface;`
+- **Category:** N/A – Live Export
+- **Reasoning & Explanation:** This is the conventional public surface of a Stremio addon. While no file *inside* this repo `require()`s `addon.js`, external consumers (Stremio hosting wrappers, `stremio-addon-sdk` `serveHTTP`, tests) import it. Removing it would break library mode. Previous report flagged it as “effectively unreachable export” – that assessment is incorrect for a published addon.
+- **Safety / Dependency Note:** Do not delete. It is required for SDK embedding.
 
 ---
 
-## 3. Observations that are *not* dead code (recorded to prevent false positives)
+## 4. Redundant or Obsolete Helper Files / Assets
 
-These were checked and confirmed **live** — listed so a future cleanup pass does not remove them by
-mistake.
-
-1. **`const path = require('path')` (Line 13)** — used at Line 432 (`path.join`). *Live.*
-2. **`const express = require('express')` (Line 12)** — used at Lines 413 and 432. *Live.* Note it
-   is only reachable inside the `require.main === module` guard, so it is a genuine runtime
-   dependency of the CLI entry point, not of the exported module.
-3. **`cheerio`, `axios`, `dotenv`, `stremio-addon-sdk`** — all four `dependencies` in
-   `package.json` are used. No unused npm dependencies were found.
-4. **`getRouter` (Line 410)** — a lazily-scoped `require` inside the entry guard; intentional and
-   used at Line 428. *Live.*
-5. **`isDubbed()`** — called at Lines 286 and 326. *Live.* Its five keyword variants
-   (`dubbed`, `dooble`, `dooble`-style transliterations, `farsi dub`, `persian dub`) are all
-   plausible real-world spellings; none is subsumed by another.
-6. **`detectQuality`'s `context = ''` default parameter** — both call sites pass an argument
-   explicitly, so the default is never exercised, but it is a harmless API affordance rather than
-   dead logic.
-7. **iframe extraction block (Lines 336–345)** — no evidence it is unreachable; the scraped site may
-   serve embedded players. Left as live code.
-8. **`persianNumbers` map (Lines 203–206)** — allocated inside the `.each` callback on every season
-   element rather than hoisted to module scope. That is a minor performance smell, **not** dead
-   code; the map is read on Line 208.
-
----
-
-## 4. Redundant / obsolete files and assets
-
-### 4.1 No obsolete JavaScript modules
-
-- **Category:** N/A — negative finding
-- **Reasoning & Explanation:** The repository contains exactly one `.js` file outside
-  `node_modules/`. There are no orphaned helper modules, no duplicated utility files, and therefore
-  no unused local `require()` statements anywhere in the project.
-
-### 4.2 `assets/icons/player-fa.png` — unreferenced asset
+### 4.1 `assets/icons/player-fa.png` — unreferenced static asset
 
 - **File Path & Line Numbers:** `assets/icons/player-fa.png` (whole file)
 - **Code Snippet / Identifier:** `player-fa.png`
 - **Category:** Unused Asset / Obsolete Resource
-- **Reasoning & Explanation:** A full-text search across `addon.js`, `README.md`,
-  `docs/DOCUMENTATION.md` and `package.json` returns **zero** references to `player-fa`. By
-  contrast, its sibling `logo.png` is referenced four times. The whole `assets/icons` directory is
-  served statically (Line 432), so the file is *reachable over HTTP* but is never linked by any
-  code, manifest or document.
-- **Safety / Dependency Note:** Because the directory is exposed via `express.static`, an external
-  consumer (a README on another site, a Stremio client cache, or a link shared out-of-band) could
-  in principle be hot-linking it. Deletion is very likely safe but is technically an
-  externally-observable change. Recommend confirming with the author before removing.
+- **Reasoning & Explanation:** Full-text grep across `addon.js`, `package.json`, `README.md`, `docs/DOCUMENTATION.md` yields zero hits for `player-fa`. Its sibling `logo.png` is referenced four times: `LOGO_PATH` constant (line 49), `LOGO` constant (line 51), manifest builder (line 65), manifest override route (line 419), and static middleware (line 427) which serves the *entire* `assets/icons` directory, making `player-fa.png` reachable over HTTP (`/assets/icons/player-fa.png`) but never linked. Likely leftover from earlier UI iteration.
+- **Safety / Dependency Note:** Because `express.static` exposes the whole directory, external hot-linking could exist (e.g., README on another site, browser cache). Deletion is externally observable. Verify no external documentation or Stremio client hardcodes `/assets/icons/player-fa.png` before removing. Otherwise safe – no code depends on it. Saves ~few KB.
 
-### 4.3 `LOGO` constant — obsolete value, superseded at runtime
+### 4.2 `docs/DOCUMENTATION.md` — obsolete documentation referencing deleted code
 
-- **File Path & Line Numbers:** `addon.js` (Lines 41–43, consumed Line 57, overridden Line 422)
-- **Code Snippet / Identifier:** `const LOGO = '/assets/icons/logo.png';`
-- **Category:** Obsolete Constant / Overridden Value
-- **Reasoning & Explanation:** `LOGO` is a **relative** path, but the code's own comment (Lines
-  415–416) states "Stremio requires absolute URLs for images in the manifest." The `/manifest.json`
-  route therefore rebuilds the manifest with an absolute logo URL, discarding the `LOGO` value for
-  every request that goes through the Express entry point. The constant survives only in
-  `addonInterface.manifest` as an invalid relative URL — i.e. it is dead for the served manifest and
-  actively wrong for any consumer that imports the module (section 1.4) and reads `manifest.logo`
-  directly.
-- **Safety / Dependency Note:** **Do not simply delete.** The `manifest` object requires *some*
-  `logo` key for SDK validation, and the imported-module path has no other source for it. The right
-  fix is to make the constant absolute (e.g. derive from a `PUBLIC_URL` env var), which would in
-  turn make the Line 417–426 override redundant. Coupled change — handle both together.
+- **File Path & Line Numbers:** `docs/DOCUMENTATION.md` (Lines 12-300+)
+- **Code Snippet / Identifier:** Sections for `fetchTitleFromMeta`, `searchSite`, `slugifyTitle`, `resolveViaEndpoint`, `contentUrlRegex`, `BASE_HOST`, `Persian_Streams`, `Persian_Streams` name
+- **Category:** Redundant / Obsolete Documentation (not code, but affects maintainability)
+- **Reasoning & Explanation:** The docs describe a 5-stage resolver (quick-search → endpoint → searchSite) with `slugifyTitle` and `fetchTitleFromMeta` calling `v3-cinemeta.strem.io`. Current `addon.js` implements **only** quick-search (single strategy). Functions `searchSite`, `slugifyTitle`, `fetchTitleFromMeta`, `resolveViaEndpoint`, variables `BASE_HOST`, `contentUrlRegex`, constant `Persian_Streams` do not exist in current code (verified by grep). The docs also still show line numbers like `addon.js:76-98` for `fetchTitleFromMeta` that now point to `resolveViaQuickSearch`. This is documentation drift, not dead code, but it is redundant and misleading for new contributors.
+- **Safety / Dependency Note:** Safe to update docs to match current single-strategy flow. No runtime impact.
+
+### 4.3 No obsolete JS modules
+
+- **File Path & Line Numbers:** N/A
+- **Code Snippet / Identifier:** No `utils/`, `helpers/`, `lib/` directories
+- **Category:** N/A – Negative finding
+- **Reasoning & Explanation:** Repo contains exactly one JS file outside `node_modules`. No orphaned helper modules, no duplicated utilities.
+- **Safety / Dependency Note:** N/A
 
 ---
 
-## 5. Latent correctness issues adjacent to the dead code
+## 5. Dead Logic Branches, Unreachable Returns/Throws, Redundant Guards
 
-Not "unused code" strictly, but discovered during reachability analysis and worth recording because
-they sit inside the same functions and would be disturbed by a cleanup.
+### 5.1 Redundant `/i` flag after explicit `.toLowerCase()`
 
-### 5.1 Unguarded null flows into `fetchPage` and the extractors
+- **File Path & Line Numbers:** `addon.js` (Lines 151-152)
+- **Code Snippet / Identifier:**
+  ```js
+  const combined = (decodedUrl + ' ' + context).toLowerCase();
+  if (combined.includes('720') || /\bhd\b/i.test(combined)) return '720p';
+  if (combined.includes('480') || /\bsd\b/i.test(combined)) return '480p';
+  ```
+- **Category:** Redundant Logic / Redundant Flag
+- **Reasoning & Explanation:** `combined` is already lowercased on line 145. The regex `/\bhd\b/i` and `/\bsd\b/i` use case-insensitive flag `i` that can never change outcome because input is guaranteed lowercase. The `i` flag is dead logic. The word-boundary `\b` itself is valuable – it prevents false positives from hashes containing `hd`/`sd` substrings – but the `i` is redundant.
+- **Safety / Dependency Note:** Safe to replace with `/\bhd\b/` and `/\bsd\b/`. No behavior change, just removes redundant flag. Keep `\b`.
 
-- **File Path & Line Numbers:** `addon.js` (Lines 364–373)
-- **Category:** Missing Guard (crash path)
-- **Reasoning & Explanation:** `resolveViaQuickSearch()` returns `null` on four distinct paths
-  (non-200/non-array response, no IMDB match, a `/profile/` redirect, or a thrown error).
-  `contentUrl` is then passed straight to `fetchPage(contentUrl)` with no null check;
-  `client.get(null)` resolves against `baseURL` and fetches the site homepage. `fetchPage` can also
-  return `null`, and that `null` `$` is then passed to `extractSeriesStreams($, ...)` /
-  `extractMovieStreams($)`, where the first `$(...)` call throws `TypeError: $ is not a function`.
-  The throw is caught by the `.catch` in the stream handler (Lines 399–402) and degrades to
-  `{ streams: [] }`, so it is invisible in production — which is precisely why it has survived.
-- **Safety / Dependency Note:** Adding an early `if (!contentUrl) return [];` and
-  `if (!$) return [];` is safe and strictly reduces wasted requests. This interacts with finding
-  1.3 — fix them in one edit.
+### 5.2 Redundant guard in `extractMovieStreams` – selector already filters, then `if` repeats same condition
 
-### 5.2 Stray space in stream `name` template
+- **File Path & Line Numbers:** `addon.js` (Lines 304-308)
+- **Code Snippet / Identifier:**
+  ```js
+  $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]').each((_, el) => {
+    const href = $(el).attr('href');
+    const text = $(el).text().trim();
+    if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('abrtech'))) {
+  ```
+- **Category:** Redundant Guard / Double Filter
+- **Reasoning & Explanation:** The CSS selector `a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]` already guarantees `href` contains one of those substrings (modulo Cheerio's attribute selector case-sensitivity, which matches `includes` behavior for ASCII). The subsequent `if (href && (...))` re-checks exactly the same three substrings. It is not dead (it also guards against `href` being undefined), but the substring part is redundant. The `href &&` null guard is the only useful part.
+- **Safety / Dependency Note:** Safe to simplify to `if (!href) return;` or keep as defensive. No behavior change. Slight DOM performance win if selector is tightened.
 
-- **File Path & Line Numbers:** `addon.js` (Lines 288 and 328)
-- **Code Snippet / Identifier:** `` name: `${quality} ${dubbedLabel}` ``
-- **Category:** Cosmetic Redundancy
-- **Reasoning & Explanation:** `dubbedLabel` is either `''` or `' • دوبله'` — it already carries its
-  own leading space. The literal space in the template therefore produces a trailing space
-  (`"1080p "`) for non-dubbed streams and a double space for dubbed ones, both visible in the
-  Stremio UI.
-- **Safety / Dependency Note:** Purely presentational; no consumer parses this string.
+### 5.3 Broad `href.includes('http')` in series fallback – overly permissive, potentially dead for non-video URLs
 
-### 5.3 Static asset middleware registered after the SDK router
+- **File Path & Line Numbers:** `addon.js` (Lines 268-273)
+- **Code Snippet / Identifier:**
+  ```js
+  if (!videoUrl) {
+    const href = epLink.attr('href');
+    if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('http'))) {
+      videoUrl = href;
+    }
+  }
+  ```
+- **Category:** Dead Logic Branch / Overly Broad Condition
+- **Reasoning & Explanation:** The third alternative `href.includes('http')` matches **any** absolute URL, not just video URLs. In the movie extractor the equivalent is tightened to `abrtech`, but here `http` would accept e.g. `https://example.com/profile/` or any navigation link, which would then be pushed as a stream and fail in Stremio. In practice `epLink` is expected to be a download button, so its `href` is usually a video or `handleDownloadClick` trigger; the `http` clause rarely fires for non-video because Strategy 1 (`a[onclick]` scan) already captures the real video URL. When Strategy 1 fails, falling back to *any* http link is risky. The condition is not technically unreachable, but it is effectively dead for valid video detection and a source of false positives.
+- **Safety / Dependency Note:** Recommend tightening to `href.includes('.mkv') || href.includes('.mp4') || href.includes('.m3u8') || href.includes('abrtech')` to match movie logic. Low risk – removes false-positive streams, not valid ones. Test against live site.
 
-- **File Path & Line Numbers:** `addon.js` (Lines 428–432)
-- **Category:** Middleware Ordering Smell
-- **Reasoning & Explanation:** `getRouter(addonInterface)` is mounted at the root **before**
-  `/assets/icons`. If the SDK router terminates unmatched requests (rather than calling `next()`),
-  the static handler — and thus the manifest's own logo URL from Line 422 — becomes unreachable.
-- **Safety / Dependency Note:** Moving `express.static` above `getRouter` is low-risk and makes the
-  logo route deterministic. Verify the logo still loads after reordering.
+### 5.4 Redundant `parseInt` on already-numbered `targetSeason` / `targetEpisode`
+
+- **File Path & Line Numbers:** `addon.js` (Lines 193, 222, 372-373)
+- **Code Snippet / Identifier:**
+  ```js
+  const targetEpNum = parseInt(targetEpisode, 10); // line 193, targetEpisode already number from line 373
+  if (parseInt(targetSeason, 10) !== seasonNum) return; // line 222, targetSeason already number
+  // in handler:
+  season = parts[1] ? parseInt(parts[1], 10) : null;
+  episode = parts[2] ? parseInt(parts[2], 10) : null;
+  ```
+- **Category:** Redundant Conversion
+- **Reasoning & Explanation:** The stream handler (lines 372-373) already parses `season` and `episode` to numbers (or null). `getStreams` receives numbers. Then `extractSeriesStreams` re-parses them with `parseInt`. `parseInt(number, 10)` coerces number to string then parses it back – e.g., `parseInt(2,10) === 2`. So the second parse is redundant, though not harmful except for NaN edge: `parseInt(null,10)` => NaN, but `parseInt(null)` never happens here because handler already produced null. However `parseInt(undefined)` => NaN, which would be caught.
+- **Safety / Dependency Note:** Safe to replace with direct numeric comparison `targetSeason !== seasonNum` and `targetEpNum = targetEpisode`. Slightly cleaner and avoids NaN pitfalls. No behavior change for valid inputs.
+
+### 5.5 `persianNumbers` map re-allocated inside `.each` loop
+
+- **File Path & Line Numbers:** `addon.js` (Lines 205-208)
+- **Code Snippet / Identifier:**
+  ```js
+  $('.download-season').each((seasonIdx, seasonEl) => {
+    // ...
+    const persianNumbers = {
+      'اول': 1, 'دوم': 2, 'سوم': 3, 'چهارم': 4, 'پنجم': 5,
+      'ششم': 6, 'هفتم': 7, 'هشتم': 8, 'نهم': 9, 'دهم': 10
+    };
+  ```
+- **Category:** Redundant Allocation / Performance Smell (not dead)
+- **Reasoning & Explanation:** The map is constant and re-created on every season element iteration. It is read on line 210 but never mutated. Hoisting it to module scope would avoid repeated allocation. Not dead code, but redundant work.
+- **Safety / Dependency Note:** Safe to hoist to top-level `const PERSIAN_NUMBERS = {...}`. No side effects.
+
+### 5.6 Defensive `req.get('host') || localhost` fallback – effectively unreachable under HTTP/1.1
+
+- **File Path & Line Numbers:** `addon.js` (Line 415)
+- **Code Snippet / Identifier:** `` `${req.protocol}://${req.get('host') || `localhost:${PORT}`}` ``
+- **Category:** Dead Defensive Branch (practically unreachable)
+- **Reasoning & Explanation:** Express's `req.get('host')` reads the `Host` header. Under HTTP/1.1, `Host` is mandatory. Node's HTTP parser will still provide it for any real Stremio client, browser, or curl request. The fallback `localhost:PORT` only fires for malformed HTTP/1.0 requests without Host, which never occur in this addon's usage. Similarly `req.protocol` is always set by Express (defaults to `http` if not TLS), so no fallback needed. This is cheap defensive code, not harmful.
+- **Safety / Dependency Note:** Keep for robustness, or remove fallback – no runtime impact. Flagged for completeness.
+
+### 5.7 `PUBLIC_URL` env check duplicated in manifest route
+
+- **File Path & Line Numbers:** `addon.js` (Lines 50, 414-415)
+- **Code Snippet / Identifier:**
+  ```js
+  const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+  // ...
+  const origin = process.env.PUBLIC_URL ? PUBLIC_URL : `${req.protocol}://${req.get('host')}`;
+  ```
+- **Category:** Redundant Logic / Partial Duplication
+- **Reasoning & Explanation:** `PUBLIC_URL` already encapsulates `process.env.PUBLIC_URL || localhost`. The ternary `process.env.PUBLIC_URL ? PUBLIC_URL : req-derived` re-checks the env var to decide whether to use request host. The intent is: if env var is set, use it (absolute, trimmed); else derive from request. The duplication is not dead, but the intermediate constant `PUBLIC_URL` is partially redundant – it could be just the trimmed env var, not the fallback. Current logic works: when env var unset, `PUBLIC_URL` = `http://localhost:PORT`, but `origin` becomes request host, so `PUBLIC_URL` fallback is ignored in HTTP mode, which is correct. The constant is still used for `LOGO` (line 51) which is the fallback for imported module mode. So not dead, but the dual meaning (sometimes localhost, sometimes trimmed env) is confusing.
+- **Safety / Dependency Note:** Could be clarified by splitting into `TRIMMED_PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(...)` and using that for the ternary. No behavior change, just clarity.
+
+### 5.8 No unreachable `return`/`throw`
+
+- **File Path & Line Numbers:** N/A
+- **Code Snippet / Identifier:** All `return` statements reachable
+- **Category:** N/A – Negative finding
+- **Reasoning & Explanation:** Scanned for code after `return`, `throw`, `process.exit`. No statements after `return` in same block, no `throw` at all. `process.exit(1)` at line 24 is guarded by `if (!BASE_URL)` and terminates process – no code after it in that branch.
+- **Safety / Dependency Note:** N/A
 
 ---
 
-## 6. Summary
+## 6. Summary Table
 
-| # | Finding | Category | Confidence | Safe to remove? |
-| --- | --- | --- | --- | --- |
-| 1.1 | `fetchTitleFromMeta()` result unused | Dead Function | High | Yes (also removes a 5 s network call) |
-| 1.2 | `title`, `year` locals | Unused Variable | High | Yes |
-| 1.3 | `contentUrl = null` dead store | Redundant Assignment | High | Yes |
-| 1.4 | Duplicate `getInterface()` | Redundant Code | High | Collapse call only — keep the export |
-| 2.1 | `quality=` param fallback | Unreachable Branch | High | Yes |
-| 2.2 | "Strategy 3" onclick scan | Redundant Branch | Medium | Merge with Strategy 1 |
-| 2.3 | `fصل` regex alternative | Dead Literal | High | Fix, don't delete (behaviour change) |
-| 2.4 | Persian-digit separator class | Redundant Pattern | Medium | Leave or implement properly |
-| 2.5 | `'hd'` / `'sd'` substring tests | Partially Dead | Medium | Tighten, don't delete |
-| 2.6 | `a[href*="http"]` selector | Redundant Selector | Medium | Replace with `abrtech` |
-| 2.7 | `req.protocol` fallback | Dead Defensive Branch | High | Optional |
-| 4.2 | `assets/icons/player-fa.png` | Unused Asset | High | Likely — confirm no hot-linking |
-| 4.3 | `LOGO` constant | Obsolete Constant | High | No — fix value instead |
+| # | Location | Identifier | Category | Confidence | Safe to Remove? |
+|---|----------|------------|----------|------------|-----------------|
+| 1.1 | `addon.js:259,300,304,329,431` | `_` index params | Unused Parameter | High | Yes – rename to `_idx` or ignore, no behavior change |
+| 1.2 | `addon.js:134` | `context = ''` default | Unused Default | Medium | Keep – useful API affordance |
+| 1.3 | `addon.js:141` | `catch (error)` | Unused Variable | Medium | Replace with `catch {}` if linting |
+| 3.1 | `addon.js:12-13` | `express`, `path` top-level requires | Conditional Unused Import | Medium | Move inside `if (require.main===module)` guard – safe, minor optimization |
+| 4.1 | `assets/icons/player-fa.png` | whole file | Unused Asset | High | Likely safe – confirm no external hot-link |
+| 4.2 | `docs/DOCUMENTATION.md` | `fetchTitleFromMeta`, `searchSite`, `slugifyTitle`, `resolveViaEndpoint` | Obsolete Docs | High | Update docs, not code |
+| 5.1 | `addon.js:151-152` | `/\bhd\b/i`, `/\bsd\b/i` | Redundant Flag | High | Remove `i` flag – safe |
+| 5.2 | `addon.js:304-308` | `a[href*=".mkv"]` + `if (href.includes...)` | Redundant Guard | Medium | Simplify to null guard – safe |
+| 5.3 | `addon.js:270` | `href.includes('http')` | Overly Broad / Dead Branch | Medium | Tighten to video extensions – behavior improvement |
+| 5.4 | `addon.js:193,222` | `parseInt(targetSeason)` double parse | Redundant Conversion | High | Replace with direct compare – safe |
+| 5.5 | `addon.js:205-208` | `persianNumbers` inside loop | Redundant Allocation | Medium | Hoist to module scope – safe, perf win |
+| 5.6 | `addon.js:415` | `req.get('host') || localhost` | Dead Defensive Branch | Low | Keep or remove – no impact |
+| 5.7 | `addon.js:50,414` | `PUBLIC_URL` dual use | Redundant Logic | Low | Refactor for clarity – safe |
 
-**Highest-value cleanup:** findings **1.1 + 1.2** together remove an entire dead helper *and* a
-per-request blocking HTTP call to an external service — the only change here with a measurable
-runtime benefit.
+**Key Takeaways:**
+- **No dead functions, no unused npm dependencies, no orphaned JS modules.** The codebase is lean – only one source file.
+- **Highest-value cleanup:** `assets/icons/player-fa.png` (unused asset) and `docs/DOCUMENTATION.md` drift. Both are non-code but affect repo hygiene.
+- **No blocking network calls are dead** – unlike previous report's `fetchTitleFromMeta`, current code only calls quick-search + page fetch, both necessary.
+- **No security-relevant dead code** that would hide vulnerabilities.
+- **All regexes and quality detection branches are live**, though `/i` flag is redundant after `toLowerCase()`.
 
-**Unused dependencies:** none. **Unused local imports:** none. **Orphaned modules:** none.
+---
 
-> No source files were modified in producing this report. This document is the only file added.
+## 7. Recommendations (Read-Only, No Code Changes Made)
+
+1. **Delete or document `player-fa.png`** – if not needed, remove; if needed for future player UI, add reference in README or manifest.
+2. **Rewrite `docs/DOCUMENTATION.md`** to reflect current single-strategy resolver. Remove sections for deleted functions, update line numbers, update flow diagram.
+3. **Hoist `persianNumbers` to module scope** and rename to `PERSIAN_SEASON_MAP` for clarity and to avoid per-iteration allocation.
+4. **Tighten `href.includes('http')`** to specific video extensions (`mkv`, `mp4`, `m3u8`, `abrtech`) to prevent false-positive streams.
+5. **Simplify redundant guards** in movie extractor and remove `/i` flag from lowercased regexes – low-risk lint cleanup.
+6. **Move `express` and `path` requires inside `if (require.main === module)`** to reduce import cost when used as library, matching existing lazy `getRouter` pattern.
+7. **Optional:** Replace `catch (error)` with `catch {}` where error is unused, and rename unused `_` params to `_index` or use `_` prefix convention per ESLint config.
+
+> No source files were modified in producing this report. This document is the only file added/overwritten per task instructions.
