@@ -9,8 +9,6 @@
  * which returns the canonical URL for both movies and series.
  */
 
-const express = require('express');
-const path = require('path');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { addonBuilder } = require('stremio-addon-sdk');
@@ -48,7 +46,18 @@ const client = axios.create({
 // /manifest.json route below rewrites the logo per-request from the Host header.
 const LOGO_PATH = '/assets/icons/logo.png';
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
-const LOGO = `${PUBLIC_URL}${LOGO_PATH}`;
+
+/**
+ * Single source of truth for the absolute logo URL: joins any origin with
+ * LOGO_PATH, tolerating a trailing slash on the origin.
+ * @param {string} origin - externally reachable origin, e.g. https://host
+ * @returns {string} absolute logo URL
+ */
+function logoUrlFor(origin) {
+  return `${origin.replace(/\/+$/, '')}${LOGO_PATH}`;
+}
+
+const LOGO = logoUrlFor(PUBLIC_URL);
 
 // Initialize addon builder with manifest
 const builder = new addonBuilder({
@@ -138,7 +147,7 @@ function detectQuality(url, context = '') {
   let decodedUrl = url || '';
   try {
     decodedUrl = decodeURIComponent(decodedUrl);
-  } catch (error) {
+  } catch {
     // Malformed escape sequence - keep the raw URL.
   }
 
@@ -148,8 +157,8 @@ function detectQuality(url, context = '') {
   if (combined.includes('1080') || combined.includes('full hd') || combined.includes('fhd')) return '1080p';
   // Match a standalone "hd"/"sd" token only, so arbitrary CDN hashes containing
   // those letters are not misread as a quality marker.
-  if (combined.includes('720') || /\bhd\b/i.test(combined)) return '720p';
-  if (combined.includes('480') || /\bsd\b/i.test(combined)) return '480p';
+  if (combined.includes('720') || /\bhd\b/.test(combined)) return '720p';
+  if (combined.includes('480') || /\bsd\b/.test(combined)) return '480p';
   if (combined.includes('360')) return '360p';
 
   return 'Unknown';
@@ -186,11 +195,22 @@ function isDubbed(text) {
 }
 
 /**
+ * Persian ordinal words used in season headings, mapped to their season number.
+ * Module-scope constant: read-only lookup, never mutated.
+ */
+const PERSIAN_NUMBERS = {
+  'اول': 1, 'دوم': 2, 'سوم': 3, 'چهارم': 4, 'پنجم': 5,
+  'ششم': 6, 'هفتم': 7, 'هشتم': 8, 'نهم': 9, 'دهم': 10
+};
+
+/**
  * Extract streams from series page for specific season/episode
  */
 function extractSeriesStreams($, targetSeason, targetEpisode) {
   const streams = [];
-  const targetEpNum = parseInt(targetEpisode, 10);
+  // targetSeason/targetEpisode are already numbers: the stream handler parses
+  // them and getStreams only calls this once both are non-null.
+  const targetEpNum = targetEpisode;
 
 
   $('.download-season').each((seasonIdx, seasonEl) => {
@@ -202,12 +222,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
     // Determine season number from Persian or English text
     let seasonNum = seasonIdx + 1;
 
-    const persianNumbers = {
-      'اول': 1, 'دوم': 2, 'سوم': 3, 'چهارم': 4, 'پنجم': 5,
-      'ششم': 6, 'هفتم': 7, 'هشتم': 8, 'نهم': 9, 'دهم': 10
-    };
-
-    for (const [persian, digit] of Object.entries(persianNumbers)) {
+    for (const [persian, digit] of Object.entries(PERSIAN_NUMBERS)) {
       if (buttonText.includes(persian)) {
         seasonNum = digit;
         break;
@@ -219,7 +234,7 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
       seasonNum = parseInt(digitSeasonMatch[1], 10);
     }
 
-    if (parseInt(targetSeason, 10) !== seasonNum) return;
+    if (targetSeason !== seasonNum) return;
 
     console.log(`Found matching season container (Season ${seasonNum})`);
 
@@ -256,14 +271,14 @@ function extractSeriesStreams($, targetSeason, targetEpisode) {
 
       // Strategy 1: scan every onclick handler in the episode row for a
       // handleDownloadClick(...) URL, taking the first one that parses.
-      $epEl.find('a[onclick]').each((_, aEl) => {
-        if (videoUrl) return false;
+      for (const aEl of $epEl.find('a[onclick]').toArray()) {
+        if (videoUrl) break;
         const onclick = $(aEl).attr('onclick');
         if (onclick) {
           const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
           if (urlMatch) videoUrl = urlMatch[1];
         }
-      });
+      }
 
       // Strategy 2: Direct href
       if (!videoUrl) {
@@ -297,45 +312,46 @@ function extractMovieStreams($) {
   const streams = [];
   console.log('Extracting movie streams...');
 
-  $('.download-list, .download-box, .dl-box').each((_, box) => {
+  for (const box of $('.download-list, .download-box, .dl-box').toArray()) {
     const $box = $(box);
     const qualityLabel = $box.find('.title span').first().text() || '';
 
-    $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]').each((_, el) => {
+    // The selector already guarantees the href contains .mkv/.mp4/abrtech,
+    // so only the null/undefined guard is needed here.
+    for (const el of $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="abrtech"]').toArray()) {
       const href = $(el).attr('href');
+      if (!href) continue;
+
       const text = $(el).text().trim();
+      const onclick = $(el).attr('onclick');
+      let videoUrl = href;
 
-      if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('abrtech'))) {
-        const onclick = $(el).attr('onclick');
-        let videoUrl = href;
-
-        if (onclick) {
-          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-          if (urlMatch) videoUrl = urlMatch[1];
-        }
-
-        const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
-        // Check if the content is dubbed based on text and video URL
-        const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? '• دوبله' : '';
-        streams.push({
-          name: `${quality}${dubbedLabel ? ` ${dubbedLabel}` : ''}`.trim(),
-          title: `${quality}`,
-          url: videoUrl
-        });
+      if (onclick) {
+        const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+        if (urlMatch) videoUrl = urlMatch[1];
       }
-    });
-  });
 
-  $('iframe[src]').each((_, iframe) => {
+      const quality = detectQuality(videoUrl, qualityLabel + ' ' + text);
+      // Check if the content is dubbed based on text and video URL
+      const dubbedLabel = isDubbed(text + ' ' + videoUrl) ? '• دوبله' : '';
+      streams.push({
+        name: `${quality}${dubbedLabel ? ` ${dubbedLabel}` : ''}`.trim(),
+        title: quality,
+        url: videoUrl
+      });
+    }
+  }
+
+  for (const iframe of $('iframe[src]').toArray()) {
     const src = $(iframe).attr('src');
     if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
       streams.push({
-        name: `Stream`,
+        name: 'Stream',
         title: 'Embedded Stream',
         url: src
       });
     }
-  });
+  }
 
   return streams;
 }
@@ -403,6 +419,8 @@ module.exports = addonInterface;
 // Start server if run directly
 if (require.main === module) {
   const { getRouter } = require('stremio-addon-sdk');
+  const express = require('express');
+  const path = require('path');
 
   const app = express();
 
@@ -416,7 +434,7 @@ if (require.main === module) {
       : `${req.protocol}://${req.get('host') || `localhost:${PORT}`}`;
     const manifestWithLogo = {
       ...addonInterface.manifest,
-      logo: `${origin}${LOGO_PATH}`
+      logo: logoUrlFor(origin)
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.end(JSON.stringify(manifestWithLogo));
@@ -428,7 +446,7 @@ if (require.main === module) {
 
   app.use(getRouter(addonInterface));
 
-  app.get('/', (_, res) => {
+  app.get('/', (_req, res) => {
     res.setHeader('content-type', 'text/html; charset=utf-8');
     res.end(
       `<h1>${addonInterface.manifest.name}</h1>` +

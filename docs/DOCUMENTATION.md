@@ -674,6 +674,8 @@ module.exports = addonInterface;
 ```js
 if (require.main === module) {
   const { getRouter } = require('stremio-addon-sdk');
+  const express = require('express');
+  const path = require('path');
   const app = express();
   ...
   app.listen(PORT, ...);
@@ -704,7 +706,7 @@ app.get('/manifest.json', (req, res) => {
 
   const manifestWithLogo = {
     ...addonInterface.manifest,
-    logo: `${origin}${LOGO_PATH}`
+    logo: logoUrlFor(origin)
   };
 
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -717,6 +719,7 @@ app.get('/manifest.json', (req, res) => {
 - اگر `PUBLIC_URL` تنظیم شده باشد، همان استفاده می‌شود.
 - اگر تنظیم نشده باشد، origin از `req.protocol` و `Host` درخواست ساخته می‌شود.
 - مسیر لوگو همیشه `/assets/icons/logo.png` است.
+- ساخت URL مطلق لوگو در هر دو حالت (manifest اولیه و این route) از طریق helper مشترک `logoUrlFor(origin)` انجام می‌شود که `LOGO_PATH` را به origin می‌چسباند.
 
 ---
 
