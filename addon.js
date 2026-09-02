@@ -1,0 +1,801 @@
+/**
+ * Persian Streams - Stremio Addon
+ * 
+ * Scrapes streaming links from the source configured via BASE_URL (in .env)
+ * for movies and TV series. This is an Iranian source providing content with
+ * Persian subtitles.
+ * 
+ * The site uses title-based URLs (e.g., /series/house-of-the-dragon/)
+ * so we fetch the title from Stremio's metadata service and convert it to a slug.
+ */
+
+const axios = require('axios');
+const cheerio = require('cheerio');
+const { addonBuilder } = require('stremio-addon-sdk');
+
+const BASE_URL = process.env.BASE_URL;
+
+if (!BASE_URL) {
+  console.error('BASE_URL is not set. Please define it in your .env file (e.g. BASE_URL=https://www.example.com)');
+  process.exit(1);
+}
+
+// Create axios instance with proper headers
+const client = axios.create({
+  baseURL: BASE_URL,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Referer': BASE_URL,
+  },
+  timeout: 15000,
+  maxRedirects: 5,
+  validateStatus: status => status < 500
+});
+
+// Logo is served as a static file by the HTTP server (see serveHTTP static
+// option below), so it is referenced by a URL instead of being embedded.
+const LOGO = '/assets/icons/logo.png';
+
+// Initialize addon builder with manifest
+const builder = new addonBuilder({
+  id: 'org.alirostami.streams.persian',
+  name: 'Persian Streams',
+  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/iranian-provider-media',
+  version: '1.2.0',
+  resources: ['stream'],
+  types: ['movie', 'series'],
+  idPrefixes: ['tt'],
+  catalogs: [],
+  contactEmail: 'rostami.ali@gmail.com',
+  author: 'Ali Rostami rostami.ali@gmail.com',
+  logo: LOGO
+});
+
+/**
+ * Fetch metadata title from Stremio's meta endpoint using IMDB ID
+ */
+async function fetchTitleFromMeta(type, imdbId) {
+  try {
+    // Stremio meta endpoint format: https://v3-cinemeta.strem.io/meta/<type>/<imdbId>.json
+    const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
+    const response = await axios.get(metaUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 5000
+    });
+
+    if (response.data && response.data.meta && response.data.meta.name) {
+      return {
+        name: response.data.meta.name,
+        year: response.data.meta.year || null
+      };
+    }
+    return null;
+  } catch (error) {
+    console.log(`Failed to fetch metadata for ${imdbId}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Resolve the real content URL via the site's quick-search endpoint using the
+ * IMDB id. This is the most reliable method: we query the endpoint with the
+ * IMDB code and match the returned `imdb_id` against the requested one, then
+ * take that entry's `url` (works for both movies and series).
+ *
+ * @returns {Promise<string|null>} final content URL or null
+ */
+async function resolveViaQuickSearch(imdbId) {
+  try {
+    const qsUrl = `/quick-search?q=${encodeURIComponent(imdbId)}&sort=modified_at%3Adesc`;
+    console.log(`Quick-search for IMDB ${imdbId} ...`);
+
+    const response = await client.get(qsUrl);
+    if (response.status !== 200 || !Array.isArray(response.data)) return null;
+
+    const match = response.data.find(
+      r => (r.imdb_id || '').toLowerCase() === imdbId.toLowerCase()
+    );
+
+    if (!match || !match.url) {
+      console.log('Quick-search: no IMDB match found');
+      return null;
+    }
+
+    const contentUrl = match.url.startsWith('http')
+      ? match.url
+      : `${BASE_URL}${match.url}`;
+
+    if (contentUrl.includes('/profile/')) {
+      console.log('Quick-search resolved to /profile/ (not found)');
+      return null;
+    }
+
+    console.log(`Resolved via quick-search: ${contentUrl}`);
+    return contentUrl;
+  } catch (error) {
+    console.log(`Quick-search error: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch and parse a page
+ */
+async function fetchPage(url) {
+  try {
+    const response = await client.get(url);
+    if (response.status !== 200) {
+      console.log(`Failed to fetch: Status ${response.status}`);
+      return null;
+    }
+    return cheerio.load(response.data);
+  } catch (error) {
+    console.error(`Fetch error for ${url}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Detect video quality from URL and text as a fallback when the source page
+ * does not expose a dedicated quality label.
+ */
+function detectQuality(url, context = '') {
+  const combined = (url + ' ' + context).toLowerCase();
+
+  if (combined.includes('2160') || combined.includes('4k') || combined.includes('uhd')) return '4K';
+  if (combined.includes('1080') || combined.includes('full hd') || combined.includes('fhd')) return '1080p';
+  if (combined.includes('720') || combined.includes('hd')) return '720p';
+  if (combined.includes('480') || combined.includes('sd')) return '480p';
+  if (combined.includes('360')) return '360p';
+
+  const qualityParam = url.match(/[?&]quality=([^&]*)/i);
+  if (qualityParam) {
+    const q = decodeURIComponent(qualityParam[1]).toLowerCase();
+    if (q.includes('2160') || q.includes('4k')) return '4K';
+    if (q.includes('1080')) return '1080p';
+    if (q.includes('720')) return '720p';
+    if (q.includes('480')) return '480p';
+  }
+
+  return 'Unknown';
+}
+
+function toEnglishDigits(value) {
+  if (value === null || value === undefined) return '';
+
+  const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+
+  return String(value).replace(/[۰-۹٠-٩]/g, digit => {
+    const persianIndex = persianDigits.indexOf(digit);
+    if (persianIndex !== -1) return String(persianIndex);
+
+    const arabicIndex = arabicDigits.indexOf(digit);
+    if (arabicIndex !== -1) return String(arabicIndex);
+
+    return digit;
+  });
+}
+
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch (_) {
+    return value;
+  }
+}
+
+function extractReleaseFormatFromFilename(filename) {
+  if (!filename) return null;
+
+  const decodedFilename = decodeUrlPart(filename)
+    .replace(/\.(mkv|mp4|m3u8|avi)$/i, '')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const episodeMatch = decodedFilename.match(/\bS\d{1,2}\s*E\d{1,3}\b/i);
+  const releasePart = episodeMatch
+    ? decodedFilename.slice(episodeMatch.index + episodeMatch[0].length).trim()
+    : decodedFilename;
+
+  const releaseTokens = releasePart.split(/\s+/).filter(Boolean);
+  const formatTokens = releaseTokens.filter(token => (
+    /^(?:2160p|1080p|720p|480p|360p|4k|uhd|fhd|hd)$/i.test(token) ||
+    /^(?:web-?dl|web-?rip|blu-?ray|brrip|hdrip|dvdrip|hdtv)$/i.test(token) ||
+    /^(?:x264|x265|h264|h265|hevc|avc)$/i.test(token) ||
+    /^(?:10bit|8bit|hdr|dv|dolbyvision)$/i.test(token) ||
+    /^(?:nf|amzn|dsnp|hulu|atvp|max)$/i.test(token)
+  ));
+
+  return formatTokens.length > 0 ? formatTokens.join(' ') : null;
+}
+
+function resolveUrl(href, baseUrl) {
+  try {
+    return new URL(href, baseUrl).toString();
+  } catch (_) {
+    return href;
+  }
+}
+
+/**
+ * Convert labels like `کیفیت : WEB-DL 4K 2160p 10bit HDR` to the clean
+ * value that should be shown in Stremio (`WEB-DL 4K 2160p 10bit HDR`).
+ */
+function cleanMetadataValue(value) {
+  if (!value) return null;
+
+  const cleaned = String(value)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/^[\s:：؛;،,|\-–—]+/, '')
+    .replace(/[\s|\-–—]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+/**
+ * Extract the value that comes after one of the given labels.
+ *
+ * Examples:
+ *   کیفیت : WEB-DL 4K 2160p 10bit HDR  -> WEB-DL 4K 2160p 10bit HDR
+ *   انکودر : PSA                       -> PSA
+ */
+function extractLabeledValue(text, labels) {
+  if (!text) return null;
+
+  const boundaryLabels = [
+    'کیفیت', 'Quality',
+    'انکودر', 'Encoder', 'Encode',
+    'حجم', 'Size',
+    'زبان', 'Language',
+    'فرمت', 'Format',
+    'رزولوشن', 'Resolution',
+    'مدت', 'زمان', 'Duration',
+    'فصل', 'قسمت', 'Season', 'Episode',
+    'دانلود', 'Download',
+    'بدون زیرنویس فارسی', 'بدون زیرنویس', 'زیرنویس فارسی', 'زیرنویس',
+    'No Persian Subtitles', 'No Persian Subtitle', 'Without Persian Subtitles', 'Without Persian Subtitle',
+    'No Farsi Subtitles', 'No Farsi Subtitle', 'Without Farsi Subtitles', 'Without Farsi Subtitle',
+    'No Subtitles', 'No Subtitle', 'Without Subtitles', 'Without Subtitle',
+    'Persian Subtitles', 'Persian Subtitle', 'Farsi Subtitles', 'Farsi Subtitle',
+    'Subtitles', 'Subtitle',
+    'صوت', 'Audio',
+    'میانگین', 'امتیاز', 'IMDb', 'IMDB', 'Rating', 'Rate',
+    'ژانر', 'Genre',
+    'سال', 'Year',
+    'کشور', 'Country',
+    'کارگردان', 'Director',
+    'بازیگران', 'Actors', 'Cast',
+    'رده', 'Age',
+    'وضعیت', 'Status',
+    'شبکه', 'Network',
+    'خلاصه', 'Story', 'Plot'
+  ];
+
+  const normalizedText = String(text)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/\r/g, '\n');
+  const lowerText = normalizedText.toLowerCase();
+
+  for (const label of labels) {
+    const labelIndex = lowerText.indexOf(label.toLowerCase());
+    if (labelIndex === -1) continue;
+
+    let valueStart = labelIndex + label.length;
+    while (valueStart < normalizedText.length && /[\s:：؛]/.test(normalizedText[valueStart])) {
+      valueStart += 1;
+    }
+
+    let valueEnd = normalizedText.length;
+    const lineEnd = normalizedText.indexOf('\n', valueStart);
+    if (lineEnd !== -1) valueEnd = Math.min(valueEnd, lineEnd);
+
+    for (const boundaryLabel of boundaryLabels) {
+      const boundaryIndex = lowerText.indexOf(boundaryLabel.toLowerCase(), valueStart);
+      if (boundaryIndex !== -1 && boundaryIndex < valueEnd) {
+        valueEnd = boundaryIndex;
+      }
+    }
+
+    const value = cleanMetadataValue(normalizedText.slice(valueStart, valueEnd));
+    if (value) return value;
+  }
+
+  return null;
+}
+
+/**
+ * Extract source-provided release labels from an HTML fragment. This preserves
+ * the exact quality line from the provider instead of reducing it to only
+ * `1080p`/`720p`, and also exposes encoder information when present.
+ */
+function detectPersianSubtitleStatus(text) {
+  if (!text) return null;
+
+  const normalizedText = String(text)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200c\u200e\u200f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const negativePatterns = [
+    /بدون\s+زیر\s*نویس/,
+    /فاقد\s+زیر\s*نویس/,
+    /زیر\s*نویس\s*(?:فارسی)?\s*[:：؛]?\s*(?:ندارد|موجود\s+نیست|اضافه\s+نشده)/,
+    /no\s+(?:persian\s+|farsi\s+)?sub(?:title)?s?/,
+    /without\s+(?:persian\s+|farsi\s+)?sub(?:title)?s?/
+  ];
+
+  if (negativePatterns.some(pattern => pattern.test(normalizedText))) {
+    return 'none';
+  }
+
+  const positivePatterns = [
+    /زیر\s*نویس\s+فارسی/,
+    /زیر\s*نویس\s*(?:فارسی)?\s*[:：؛]?\s*(?:دارد|موجود)/,
+    /با\s+زیر\s*نویس/,
+    /دارای\s+زیر\s*نویس/,
+    /زیر\s*نویس\s+چسبیده/,
+    /persian\s+sub(?:title)?s?/,
+    /farsi\s+sub(?:title)?s?/,
+    /hard\s*sub(?:bed)?/,
+    /hardcoded\s+sub(?:title)?s?/,
+    /\bsubbed\b/
+  ];
+
+  if (positivePatterns.some(pattern => pattern.test(normalizedText))) {
+    return 'persian';
+  }
+
+  return null;
+}
+
+function formatSubtitleLabel(status) {
+  if (status === 'persian') return '';
+  if (status === 'none') return '';
+  return null;
+}
+
+function extractReleaseInfoFromElement($, element) {
+  if (!element) return { quality: null, encoder: null, subtitleStatus: null };
+
+  const text = $(element).text();
+
+  return {
+    quality: extractLabeledValue(text, ['کیفیت', 'Quality']),
+    encoder: extractLabeledValue(text, ['انکودر', 'Encoder', 'Encode']),
+    subtitleStatus: detectPersianSubtitleStatus(text)
+  };
+}
+
+/**
+ * Try the current node first, then walk up a few parents. This handles pages
+ * where quality/encoder/subtitle labels are placed on a wrapper around the
+ * download row. Fields are merged independently so finding quality in the row
+ * does not prevent reading subtitle information from a parent wrapper.
+ */
+function extractReleaseInfoNearElement($, element, maxDepth = 4) {
+  const result = { quality: null, encoder: null, subtitleStatus: null };
+  let current = $(element);
+
+  for (let depth = 0; depth <= maxDepth && current.length > 0; depth += 1) {
+    const info = extractReleaseInfoFromElement($, current[0]);
+    result.quality = result.quality || info.quality;
+    result.encoder = result.encoder || info.encoder;
+    result.subtitleStatus = result.subtitleStatus || info.subtitleStatus;
+
+    if (result.quality && result.encoder && result.subtitleStatus) break;
+    current = current.parent();
+  }
+
+  return result;
+}
+
+function buildStreamName(quality, dubbedLabel = '', subtitleStatus = null) {
+  const subtitleLabel = formatSubtitleLabel(subtitleStatus);
+  const subtitlePart = subtitleLabel ? ` • ${subtitleLabel}` : '';
+  return `${quality}${dubbedLabel}${subtitlePart}`.trim();
+}
+
+/**
+ * Check if content is dubbed based on filename/text
+ * Looks for "Dubbed", "Dooble", "دوبله" in the text
+ * @param {string} text - Text to check (filename, title, etc.)
+ * @returns {boolean} True if dubbed
+ */
+function isDubbed(text) {
+  if (!text) return false;
+  const lowerText = text.toLowerCase();
+  // Check for various dubbed indicators
+  return lowerText.includes('dubbed') ||
+    lowerText.includes('dooble') ||
+    lowerText.includes('دوبله') ||
+    lowerText.includes('farsi dub') ||
+    lowerText.includes('persian dub');
+}
+
+function extractSeasonNumberFromLegacyLink(text, href) {
+  const combined = toEnglishDigits(`${text || ''} ${decodeUrlPart(href || '')}`);
+
+  const seasonMatch = combined.match(/(?:فصل|season|\bS)\s*0*(\d{1,2})\b/i);
+  if (seasonMatch) return parseInt(seasonMatch[1], 10);
+
+  const folderMatch = combined.match(/\/S0*(\d{1,2})(?:\/|$)/i);
+  if (folderMatch) return parseInt(folderMatch[1], 10);
+
+  return null;
+}
+
+function extractEpisodeMatchFromFilename(filename, targetSeason, targetEpisode) {
+  const normalizedFilename = toEnglishDigits(decodeUrlPart(filename));
+  const seasonNum = parseInt(targetSeason, 10);
+  const episodeNum = parseInt(targetEpisode, 10);
+
+  const seasonEpisodeMatch = normalizedFilename.match(/\bS0*(\d{1,2})\s*E0*(\d{1,3})\b/i);
+  if (seasonEpisodeMatch) {
+    return parseInt(seasonEpisodeMatch[1], 10) === seasonNum &&
+      parseInt(seasonEpisodeMatch[2], 10) === episodeNum;
+  }
+
+  const xMatch = normalizedFilename.match(/\b0*(\d{1,2})x0*(\d{1,3})\b/i);
+  if (xMatch) {
+    return parseInt(xMatch[1], 10) === seasonNum &&
+      parseInt(xMatch[2], 10) === episodeNum;
+  }
+
+  const episodeOnlyMatch = normalizedFilename.match(/\bE0*(\d{1,3})\b/i);
+  return episodeOnlyMatch ? parseInt(episodeOnlyMatch[1], 10) === episodeNum : false;
+}
+
+async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, targetEpisode, pageSubtitleStatus = null) {
+  const streams = [];
+
+  try {
+    console.log(`Fetching legacy season directory: ${seasonUrl}`);
+    const response = await axios.get(seasonUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 15000,
+      maxRedirects: 5,
+      validateStatus: status => status < 500
+    });
+
+    if (response.status !== 200) {
+      console.log(`Legacy season directory returned status ${response.status}`);
+      return streams;
+    }
+
+    const finalUrl = response.request?.res?.responseUrl || seasonUrl;
+    const $directory = cheerio.load(response.data);
+
+    $directory('a[href]').each((_, link) => {
+      const href = $directory(link).attr('href');
+      if (!href || href === '../' || href.startsWith('?')) return;
+      if (!/\.(mkv|mp4|m3u8|avi)(?:$|[?#])/i.test(href)) return;
+
+      const filename = decodeUrlPart(href.split('/').pop().split('?')[0]);
+      if (!extractEpisodeMatchFromFilename(filename, targetSeason, targetEpisode)) return;
+
+      const videoUrl = resolveUrl(href, finalUrl);
+      const quality = extractReleaseFormatFromFilename(filename) || detectQuality(videoUrl, filename);
+      const dubbedLabel = isDubbed(`${filename} ${videoUrl}`) ? ' • دوبله' : '';
+      const subtitleStatus = detectPersianSubtitleStatus(filename) || pageSubtitleStatus;
+      const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+      const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+      const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+      streams.push({
+        name: streamName,
+        title: `S${targetSeason}E${targetEpisode} - ${quality}${subtitleTitlePart}`,
+        url: videoUrl
+      });
+      console.log(`Added legacy directory stream: ${streamName}`);
+    });
+  } catch (error) {
+    console.log(`Legacy season directory error: ${error.message}`);
+  }
+
+  return streams;
+}
+
+async function extractLegacySeriesStreams($, targetSeason, targetEpisode) {
+  const seasonLinks = [];
+  const pageSubtitleStatus = detectPersianSubtitleStatus($('main, article, .single, .post, body').first().text());
+
+  $('a[href]').each((_, link) => {
+    const $link = $(link);
+    const href = $link.attr('href');
+    const text = $link.text().trim();
+    if (!href) return;
+
+    const seasonNum = extractSeasonNumberFromLegacyLink(text, href);
+    if (seasonNum !== parseInt(targetSeason, 10)) return;
+
+    const decodedHref = decodeUrlPart(href);
+    const looksLikeSeasonDirectory = /\/S0*\d{1,2}\/?(?:$|[?#])/i.test(decodedHref) ||
+      /دانلود\s+فصل|download\s+season/i.test(toEnglishDigits(text));
+    if (!looksLikeSeasonDirectory) return;
+
+    const absoluteUrl = href.startsWith('http') ? href : resolveUrl(href, BASE_URL);
+    if (!seasonLinks.includes(absoluteUrl)) seasonLinks.push(absoluteUrl);
+  });
+
+  const streams = [];
+  for (const seasonUrl of seasonLinks) {
+    const directoryStreams = await extractStreamsFromSeasonDirectory(
+      seasonUrl,
+      targetSeason,
+      targetEpisode,
+      pageSubtitleStatus
+    );
+    streams.push(...directoryStreams);
+  }
+
+  return streams;
+}
+
+/**
+ * Extract streams from series page for specific season/episode
+ */
+async function extractSeriesStreams($, targetSeason, targetEpisode) {
+  const streams = [];
+  const targetEpNum = parseInt(targetEpisode, 10);
+
+
+  $('.download-season').each((seasonIdx, seasonEl) => {
+    const $seasonEl = $(seasonEl);
+    const button = $seasonEl.find('button[data-bs-toggle="collapse"]').first();
+    const buttonText = button.text();
+
+    // Determine season number from Persian or English text
+    let seasonNum = seasonIdx + 1;
+
+    const persianNumbers = {
+      'اول': 1, 'دوم': 2, 'سوم': 3, 'چهارم': 4, 'پنجم': 5,
+      'ششم': 6, 'هفتم': 7, 'هشتم': 8, 'نهم': 9, 'دهم': 10
+    };
+
+    for (const [persian, digit] of Object.entries(persianNumbers)) {
+      if (buttonText.includes(persian)) {
+        seasonNum = digit;
+        break;
+      }
+    }
+
+    const digitSeasonMatch = buttonText.match(/(?:season|fصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+    if (digitSeasonMatch) {
+      seasonNum = parseInt(digitSeasonMatch[1], 10);
+    }
+
+    if (parseInt(targetSeason, 10) !== seasonNum) return;
+
+    console.log(`Found matching season container (Season ${seasonNum})`);
+
+    const episodeItems = $seasonEl.find('.series-downloaditems .d-flex');
+
+    episodeItems.each((epIdx, epEl) => {
+      const $epEl = $(epEl);
+      const epLink = $epEl.find('a.btn-block.btn-default').first();
+      const epText = epLink.text().trim();
+      let epNum = epIdx + 1;
+
+      const persianEpMatch = epText.match(/(?:قسمت)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+      if (persianEpMatch) {
+        epNum = parseInt(persianEpMatch[1], 10);
+      } else {
+        const englishEpMatch = epText.match(/(?:episode|ep)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+        if (englishEpMatch) {
+          epNum = parseInt(englishEpMatch[1], 10);
+        } else {
+          const href = epLink.attr('href');
+          if (href) {
+            const hrefEpMatch = href.match(/[?&]episode=(\d+)/i);
+            if (hrefEpMatch) epNum = parseInt(hrefEpMatch[1], 10);
+          }
+        }
+      }
+
+      if (epNum !== targetEpNum) return;
+
+      console.log(`Found matching episode ${epNum}`);
+
+      let videoUrl = null;
+
+      // Strategy 1: onclick handler
+      const onclickBtn = $epEl.find('a[onclick]').first();
+      if (onclickBtn.length > 0) {
+        const onclick = onclickBtn.attr('onclick');
+        if (onclick) {
+          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+          if (urlMatch) videoUrl = urlMatch[1];
+        }
+      }
+
+      // Strategy 2: Direct href
+      if (!videoUrl) {
+        const href = epLink.attr('href');
+        if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('http'))) {
+          videoUrl = href;
+        }
+      }
+
+      // Strategy 3: Check sibling elements
+      if (!videoUrl) {
+        $epEl.find('a[onclick]').each((_, aEl) => {
+          const onclick = $(aEl).attr('onclick');
+          if (onclick && !videoUrl) {
+            const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+            if (urlMatch) videoUrl = urlMatch[1];
+          }
+        });
+      }
+
+      if (videoUrl) {
+        const releaseInfo = extractReleaseInfoNearElement($, epEl);
+        const fallbackContext = `${buttonText} ${$epEl.text()} ${videoUrl}`;
+        const quality = releaseInfo.quality || detectQuality(videoUrl, fallbackContext);
+        const encoder = releaseInfo.encoder;
+        const subtitleStatus = releaseInfo.subtitleStatus;
+        // Check if the content is dubbed based on episode text and video URL
+        const dubbedLabel = isDubbed(`${$epEl.text()} ${videoUrl}`) ? ' • دوبله' : '';
+        const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+        const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+        const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+        const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+        streams.push({
+          name: streamName,
+          title: `S${targetSeason}E${targetEpisode} - ${quality}${encoderTitle}${subtitleTitlePart}`,
+          url: videoUrl
+        });
+        console.log(`Added stream: ${streamName}`);
+      }
+    });
+  });
+
+  if (streams.length === 0) {
+    const legacyStreams = await extractLegacySeriesStreams($, targetSeason, targetEpisode);
+    streams.push(...legacyStreams);
+  }
+
+  return streams;
+}
+
+/**
+ * Extract streams from movie page
+ */
+function extractMovieStreams($) {
+  const streams = [];
+  console.log('Extracting movie streams...');
+  const pageReleaseInfo = extractReleaseInfoFromElement($, $('main, article, .single, .post, body').first()[0]);
+
+  $('.download-list, .download-box, .dl-box').each((_, box) => {
+    const $box = $(box);
+    const qualityLabel = $box.find('.title span').first().text() || '';
+
+    $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="http"]').each((_, el) => {
+      const href = $(el).attr('href');
+      const text = $(el).text().trim();
+
+      if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('abrtech'))) {
+        const onclick = $(el).attr('onclick');
+        let videoUrl = href;
+
+        if (onclick) {
+          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+          if (urlMatch) videoUrl = urlMatch[1];
+        }
+
+        const releaseElement = $(el).closest('.d-flex, li, .download-item, .download-list, .download-box, .dl-box');
+        const releaseInfo = extractReleaseInfoNearElement($, releaseElement[0] || box);
+        const boxReleaseInfo = extractReleaseInfoFromElement($, box);
+        const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
+        const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
+        const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
+        const subtitleStatus = releaseInfo.subtitleStatus || boxReleaseInfo.subtitleStatus || pageReleaseInfo.subtitleStatus;
+        // Check if the content is dubbed based on text and video URL
+        const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
+        const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+        const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+        const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+        const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+        streams.push({
+          name: streamName,
+          title: `${quality}${encoderTitle}${subtitleTitlePart}`,
+          url: videoUrl
+        });
+      }
+    });
+  });
+
+  $('iframe[src]').each((_, iframe) => {
+    const src = $(iframe).attr('src');
+    if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
+      streams.push({
+        name: `Stream`,
+        title: 'Embedded Stream',
+        url: src
+      });
+    }
+  });
+
+  return streams;
+}
+
+/**
+ * Main stream handler - get streams for a given content
+ */
+async function getStreams(type, imdbId, season = null, episode = null) {
+  console.log('\n=== Stream Request ===');
+  console.log(`Type: ${type}, IMDB: ${imdbId}, Season: ${season}, Episode: ${episode}`);
+
+  // Resolve the metadata title (and year) from Stremio's cinemeta service.
+  const meta = await fetchTitleFromMeta(type, imdbId);
+  const title = meta ? meta.name : null;
+  const year = meta ? meta.year : null;
+
+  let contentUrl = null;
+
+  contentUrl = await resolveViaQuickSearch(imdbId);
+
+  let $ = await fetchPage(contentUrl);
+
+  let streams = [];
+  if (type === 'series' && season !== null && episode !== null) {
+    console.log(`Looking for Season ${season}, Episode ${episode}`);
+    streams = await extractSeriesStreams($, season, episode);
+  } else if (type === 'movie') {
+    streams = extractMovieStreams($);
+  }
+
+  console.log(`Found ${streams.length} stream(s)`);
+  return streams;
+}
+
+// Define stream handler
+builder.defineStreamHandler((args) => {
+  const { type, id } = args;
+  let imdbId = id;
+  let season = null;
+  let episode = null;
+
+  if (type === 'series') {
+    const parts = id.split(':');
+    imdbId = parts[0];
+    season = parts[1] ? parseInt(parts[1], 10) : null;
+    episode = parts[2] ? parseInt(parts[2], 10) : null;
+    console.log(`\nSeries request: ${imdbId}, S${season}E${episode}`);
+  } else {
+    console.log(`\nMovie request: ${imdbId}`);
+  }
+
+  return getStreams(type, imdbId, season, episode)
+    .then(streams => ({ streams }))
+    .catch(error => {
+      console.error('Handler error:', error);
+      return { streams: [] };
+    });
+});
+
+const addonInterface = builder.getInterface();
+
+// Export the SDK interface plus the pure stream function. The Worker uses
+// getStreams directly and does not load the legacy Express runtime.
+module.exports = {
+  ...addonInterface,
+  getStreams
+};
+
