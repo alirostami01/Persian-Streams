@@ -2,10 +2,10 @@
   "name": "f2my-stremio-addon",
   "version": "1.0.0",
   "description": "Unofficial Stremio addon for streaming content from f2my.top",
-  "main": "addon.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node addon.js",
-    "dev": "node --watch addon.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "keywords": [
     "stremio",
