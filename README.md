@@ -17,6 +17,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Stremio-Addon-blue?style=flat-square" alt="Stremio Addon" />
   <img src="https://img.shields.io/badge/Node.js-20.18.1%2B-green?style=flat-square" alt="Node.js" />
+  <img src="https://img.shields.io/badge/Cloudflare-Workers-orange?style=flat-square" alt="Cloudflare Workers" />
   <img src="https://img.shields.io/badge/Manifest-v1.2.0-purple?style=flat-square" alt="Manifest Version" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-yellow?style=flat-square" alt="License" />
 </p>
@@ -52,29 +53,48 @@
 - 🎞️ **تشخیص heuristic کیفیت** از URL و متن پیرامونی: `4K`، `1080p`، `720p`، `480p`، `360p` یا `Unknown`
 - 🧩 **استخراج لینک از ساختارهای رایج صفحه دانلود** شامل `handleDownloadClick(...)`، لینک مستقیم و `iframe`
 - 🖼️ **لوگوی مطلق در manifest** که به‌صورت خودکار از میزبان درخواست ساخته می‌شود
-- 📦 **قابل اجرا به دو شکل**: اجرای مستقیم با سرور Express/HTTP یا import به‌عنوان interface افزونه استرمیو
+- 📦 **دو runtime**: اجرای Node.js/Express (`server.js`) و Cloudflare Workers (`worker.js`) با هسته مشترک `addon.js`
+- ⚡ **بیلدر سبک** (`stremio-builder.js`) جایگزین SDK رسمی برای جلوگیری از باندل Express در Workers
 
 ---
 
 ## 🗂️ ساختار پروژه
 
+ساختار واقعی و به‌روز پروژه (خروجی `ls -R`):
+
 ```text
 .
-├── .gitignore               # نادیده‌گرفتن .env و node_modules/
-├── LICENSE                  # Apache License 2.0
-├── README.md                # همین فایل — راهنمای کاربر و راه‌اندازی
-├── addon.js                 # منطق کامل افزونه: manifest، استخراج stream و سرور HTTP
-├── package.json             # اسکریپت‌ها و وابستگی‌های Node.js
-├── package-lock.json        # نسخه‌های قفل‌شده وابستگی‌ها
+├── .gitignore
+├── .github/
+│   └── workflows/
+│       └── deploy-streams.yml   # دیپلوی خودکار Worker به Cloudflare
+├── LICENSE                      # Apache License 2.0
+├── README.md                    # همین فایل — راهنمای کاربر و راه‌اندازی
+├── addon.js                     # هسته: manifest، استخراج stream، getStreams
+├── stremio-builder.js           # بیلدر سبک Stremio (جایگزین SDK رسمی در Workers)
+├── server.js                    # سرور Node.js / Express (main در package.json)
+├── worker.js                    # آداپتور Cloudflare Workers (main در wrangler.jsonc)
+├── wrangler.jsonc               # پیکربندی Worker: alias، assets، vars.BASE_URL
+├── package.json                 # اسکریپت‌ها و وابستگی‌های Node.js
+├── package-lock.json            # نسخه‌های قفل‌شده وابستگی‌ها
 ├── assets/
 │   └── icons/
-│       ├── logo.png         # لوگوی استفاده‌شده در manifest
-│       └── player-fa.png    # فایل استاتیک؛ فعلاً در manifest استفاده نشده است
+│       ├── logo.png             # لوگوی استفاده‌شده در manifest
+│       └── player-fa.png        # فایل استاتیک اضافی
 └── docs/
-    └── DOCUMENTATION.md     # مستندات فنی کامل مطابق ساختار فعلی کد
+    └── DOCUMENTATION.md         # مستندات فنی کامل مطابق ساختار فعلی کد
 ```
 
-> پروژه در حال حاضر فایل تست، پیکربندی lint، `Dockerfile`، CI workflow یا `.env.example` ندارد.
+| مسیر | نقش |
+|------|-----|
+| `addon.js` | هسته استخراج؛ تمام تابع‌های `fetch*`، `extract*`، `detect*`، manifest و `defineStreamHandler`. Export: `{ ...addonInterface, getStreams }` |
+| `stremio-builder.js` | کلاس `AddonBuilder` سبک با `defineStreamHandler` و `getInterface()`؛ در `wrangler.jsonc` با alias جایگزین `stremio-addon-sdk` می‌شود |
+| `server.js` | سرور Node؛ `dotenv`، `express`, `getRouter(addonInterface)` از SDK رسمی، ساخت لوگوی مطلق با `x-forwarded-proto`، سرو `assets/icons` |
+| `worker.js` | Worker؛ پارسر مسیرهای `/streams/...`، تولید JSON با CORS، سرو asset از `env.ASSETS`، فراخوانی مستقیم `getStreams` |
+| `wrangler.jsonc` | نام Worker، `alias`, `assets.directory`, `vars.BASE_URL`, `compatibility_date` |
+| `.github/workflows/deploy-streams.yml` | دیپلوی خودکار Worker هنگام push به `main` |
+
+> پروژه در حال حاضر فایل تست، پیکربندی lint، `Dockerfile` یا `.env.example` ندارد.
 
 ---
 
@@ -85,6 +105,7 @@
 - [Node.js](https://nodejs.org/) نسخه `20.18.1` یا بالاتر
   - دلیل: نسخه قفل‌شده `cheerio` در `package-lock.json` مقدار `engines.node >= 20.18.1` دارد.
 - npm
+- برای حالت Worker: [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (`npx wrangler`)
 - برنامه Stremio برای تست نصب افزونه
 
 ### ۱. دریافت کد
@@ -100,7 +121,7 @@ cd iranian-provider-media
 npm install
 ```
 
-### ۳. ساخت فایل `.env`
+### ۳. ساخت فایل `.env` (برای Node)
 
 در ریشه پروژه یک فایل `.env` بسازید:
 
@@ -109,69 +130,90 @@ PORT=8000
 BASE_URL=https://www.example.com
 ```
 
-| متغیر | وضعیت | پیش‌فرض | توضیح |
-|-------|-------|---------|-------|
-| `BASE_URL` | **اجباری** | — | آدرس پایه منبع ایرانی. اگر تنظیم نشود، برنامه با پیام خطا متوقف می‌شود. |
-| `PORT` | اختیاری | `8000` | پورت سرور HTTP. |
+| متغیر | وضعیت | پیش‌فرض | محل مصرف | توضیح |
+|-------|-------|---------|----------|-------|
+| `BASE_URL` | **اجباری** | — | `addon.js` | آدرس پایه منبع ایرانی. اگر تنظیم نشود، برنامه با پیام خطا متوقف می‌شود. |
+| `PORT` | اختیاری | `8000` | `server.js` | پورت سرور HTTP. |
 
-> ℹ️ در نسخه فعلی کد **فقط همین دو متغیر** خوانده می‌شوند. متغیرهایی مانند `PUBLIC_URL` که در نسخه‌های قبلی مستندات ذکر شده بودند دیگر در کد وجود ندارند؛ URL مطلق لوگو به‌صورت خودکار از پروتکل و هدر `Host` درخواست ساخته می‌شود.
+> ℹ️ در Node **فقط همین دو متغیر** خوانده می‌شوند. URL مطلق لوگو به‌صورت خودکار از `x-forwarded-proto` + `Host` درخواست ساخته می‌شود.
+
+برای Cloudflare Workers مقدار `BASE_URL` در `wrangler.jsonc` بخش `vars` قرار دارد و در داشبورد Cloudflare قابل override است:
+
+```jsonc
+"vars": { "BASE_URL": "https://f2my.top" }
+```
 
 می‌توانید بدون فایل `.env` هم اجرا کنید:
 
 ```bash
-BASE_URL=https://www.example.com PORT=8000 node addon.js
+BASE_URL=https://www.example.com PORT=8000 node server.js
 ```
 
 ### ۴. اجرای برنامه
 
+#### حالت Node.js (پیشنهادی برای توسعه محلی)
+
 ```bash
-npm start        # اجرای معمولی
-npm run dev      # اجرای توسعه با watch mode
+npm start        # اجرای معمولی: node server.js
+npm run dev      # اجرای توسعه با watch mode: node --watch server.js
 ```
 
 خروجی موفق:
 
 ```text
-===========================================
-Persian Streams Stremio Addon (Iranian Source)
-===========================================
-Server running on port 8000
+Persian Streams running on port 8000
 Manifest: http://localhost:8000/manifest.json
-Install: stremio://localhost:8000/manifest.json
-===========================================
 ```
 
-اگر پورت اشغال باشد، برنامه راهنمای شفاف چاپ می‌کند و خارج می‌شود:
+اگر پورت اشغال باشد:
 
 ```text
 Port 8000 is already in use.
-Stop the other process using this port, or start the addon with another port:
+```
+
+راه‌حل:
+
+```bash
 PORT=8001 npm start
+```
+
+#### حالت Cloudflare Workers (Edge)
+
+```bash
+npx wrangler dev
+# Manifest: http://localhost:8787/streams/manifest.json
 ```
 
 ### ۵. نصب در Stremio
 
+**Node:**
+
 ```text
 stremio://localhost:8000/manifest.json
+```
+
+**Workers (لوکال):**
+
+```text
+stremio://localhost:8787/streams/manifest.json
 ```
 
 یا ابتدا manifest را در مرورگر بررسی کنید:
 
 ```text
 http://localhost:8000/manifest.json
+http://localhost:8787/streams/manifest.json
 ```
 
 ---
 
 ## ☁️ استقرار (Deployment)
 
-این پروژه یک برنامه Node.js/Express است و می‌تواند روی VPS، Docker، Railway، Render، Fly.io، Heroku یا هر میزبان Node.js دیگری اجرا شود.
-
-چک‌لیست استقرار:
+### گزینه A: Node.js hosting (VPS, Railway, Render, Fly.io, Heroku)
 
 1. Node.js نسخه `20.18.1+` روی محیط اجرا فعال باشد.
 2. وابستگی‌ها را با `npm install` نصب کنید.
-3. دستور اجرا را روی `npm start` (یا `node addon.js`) بگذارید.
+3. دستور اجرا را روی `npm start` (یعنی `node server.js`) بگذارید. `main` در `package.json` همین است.
 4. `BASE_URL` را در Environment Variables تنظیم کنید (بدون آن سرویس بالا نمی‌آید).
 5. `PORT` معمولاً توسط خود میزبان تزریق می‌شود؛ کد آن را می‌خواند.
 6. آدرس نصب بعد از استقرار:
@@ -180,9 +222,33 @@ http://localhost:8000/manifest.json
    stremio://YOUR_DOMAIN/manifest.json
    ```
 
-> اگر پشت reverse proxy اجرا می‌کنید، مطمئن شوید مسیرهای `/manifest.json`، `/stream/...` و `/assets/icons/logo.png` قابل دسترسی هستند.
->
-> ⚠️ نکته HTTPS: کد فعلی `app.set('trust proxy', true)` ندارد، بنابراین پشت پراکسی TLS ممکن است URL لوگو با `http://` تولید شود و مرورگر آن را بلاک کند. مقدار `logo` را در خروجی `/manifest.json` بررسی کنید.
+> مسیرهای ضروری: `/manifest.json`, `/stream/...`, `/assets/icons/logo.png`
+
+### گزینه B: Cloudflare Workers (پیشنهادی برای Edge, رایگان)
+
+1. `wrangler.jsonc` مقدار `vars.BASE_URL` را دارد؛ می‌توان در داشبورد override کرد.
+2. `npm install`
+3. دیپلوی دستی:
+
+   ```bash
+   npx wrangler deploy
+   ```
+
+   یا خودکار via GitHub Actions (push به `main` با تغییرات `worker.js`, `addon.js`, `stremio-builder.js`, `wrangler.jsonc`, `assets/**`).
+
+4. آدرس نصب بعد از استقرار:
+
+   ```text
+   stremio://<worker>.workers.dev/streams/manifest.json
+   ```
+
+> مسیرهای ضروری Worker: `/streams/manifest.json`, `/streams/stream/...`, `/streams/assets/icons/logo.png`
+> تمام پاسخ‌های JSON هدر `access-control-allow-origin: *` دارند.
+
+### نکات HTTPS و Proxy
+
+- **Node:** سرور `x-forwarded-proto` را می‌خواند تا پشت TLS proxy لوگو `https` شود. اگر پراکسی شما این هدر را ست نمی‌کند، `app.set('trust proxy', true)` را اضافه کنید یا مطمئن شوید مقدار `logo` در `/manifest.json` درست است.
+- **Workers:** `url.origin` همیشه scheme درست را دارد؛ نیازی به تنظیم اضافی نیست.
 
 ---
 
@@ -209,6 +275,8 @@ WEB-DL 1080p x265          →  S1E3 - WEB-DL 1080p x265 • encoder: PSA
 
 ## 🔌 مسیرها و API
 
+### Node.js (server.js)
+
 | مسیر | توضیح |
 |------|-------|
 | `GET /` | صفحه ساده معرفی افزونه و لینک نصب محلی |
@@ -217,29 +285,61 @@ WEB-DL 1080p x265          →  S1E3 - WEB-DL 1080p x265 • encoder: PSA
 | `GET /stream/movie/{imdbId}.json` | streamهای فیلم؛ مثال: `/stream/movie/tt1234567.json` |
 | `GET /stream/series/{imdbId}:{season}:{episode}.json` | stream یک قسمت سریال؛ مثال: `/stream/series/tt1234567:1:3.json` |
 
-> route جداگانه‌ای به نام `/health` در کد وجود ندارد و `404` برمی‌گرداند؛ برای health check از `/manifest.json` استفاده کنید.
+### Cloudflare Workers (worker.js)
+
+| مسیر | توضیح |
+|------|-------|
+| `GET /` | JSON وضعیت: `{ name, status:'ok', manifest:'/streams/manifest.json' }` |
+| `GET /streams` یا `/streams/` | Redirect 302 به `/streams/manifest.json` |
+| `GET /streams/manifest.json` | manifest با لوگوی مطلق `https://<origin>/streams/assets/icons/logo.png` |
+| `GET /streams/assets/icons/logo.png` | لوگوی افزونه (از `env.ASSETS`) |
+| `GET /streams/stream/movie/{imdbId}.json` | stream فیلم در Worker |
+| `GET /streams/stream/series/{imdbId}:{season}:{episode}.json` | stream سریال در Worker |
+
+> route جداگانه‌ای به نام `/health` در کد وجود ندارد و `404` برمی‌گرداند؛ برای health check از `/manifest.json` یا `/streams/manifest.json` استفاده کنید.
 
 بررسی سریع با curl:
 
 ```bash
+# Node
 curl http://localhost:8000/manifest.json
 curl http://localhost:8000/stream/movie/tt1234567.json
 curl http://localhost:8000/stream/series/tt1234567:1:3.json
+
+# Workers
+curl http://localhost:8787/streams/manifest.json
+curl http://localhost:8787/streams/stream/movie/tt1234567.json
+curl http://localhost:8787/streams/stream/series/tt1234567:1:3.json
 ```
 
 ---
 
 ## ⚙️ خلاصه عملکرد فنی
 
+### معماری ماژولار
+
+```text
+                    stremio-builder.js (بیلدر سبک)
+                           │
+         wrangler.jsonc ───┼─── addon.js (هسته: manifest + getStreams + extract*)
+         alias SDK → builder   │         │
+                               │         ├── server.js (Express + getRouter)
+                               │         └── worker.js (Cloudflare adapter)
+                               │
+Stremio → /stream/... یا /streams/stream/... → getStreams()
+```
+
+### جریان هسته (addon.js)
+
 ```text
 Stremio request
    ↓
-builder.defineStreamHandler(args)
+builder.defineStreamHandler(args)  ← از stremio-builder.js در Worker، یا SDK رسمی در Node via getRouter
    ↓
 getStreams(type, imdbId, season, episode)
    ├─ fetchTitleFromMeta(...)        ← Cinemeta (نتیجه فعلاً استفاده نمی‌شود)
-   ├─ resolveViaQuickSearch(imdbId)
-   ├─ fetchPage(contentUrl)
+   ├─ resolveViaQuickSearch(imdbId)  ← GET {BASE_URL}/quick-search?q={imdbId}
+   ├─ fetchPage(contentUrl)          ← HTML + cheerio.load
    └─ extractMovieStreams($)
       یا extractSeriesStreams($, S, E)
              └─ fallback: extractLegacySeriesStreams → extractStreamsFromSeasonDirectory
@@ -256,6 +356,8 @@ getStreams(type, imdbId, season, episode)
 - لینک‌های سریال از `.download-season` و `.series-downloaditems .d-flex` خوانده می‌شوند.
 - کیفیت ابتدا از برچسب متنی صفحه (`کیفیت : ...`) و در نبود آن با heuristic از URL/متن تشخیص داده می‌شود.
 - در صورت خطا یا پیدا نشدن محتوا، پاسخ افزونه `{ "streams": [] }` است.
+- `addon.js` دیگر سرور ندارد؛ `server.js` نقطه ورود Node و `worker.js` نقطه ورود Edge است.
+- `wrangler.jsonc` با `alias: { "stremio-addon-sdk": "./stremio-builder.js" }` از باندل شدن Express در Workers جلوگیری می‌کند.
 
 برای توضیح دقیق تک‌تک تابع‌ها، selectorها و مسائل شناخته‌شده، فایل [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) را ببینید.
 
@@ -265,7 +367,9 @@ getStreams(type, imdbId, season, episode)
 
 ### پیام `BASE_URL is not set` می‌بینم
 
-فایل `.env` وجود ندارد یا `BASE_URL` در آن تعریف نشده است. مقدار را اضافه کنید و دوباره اجرا کنید. توجه کنید این بررسی حتی هنگام import کردن `addon.js` هم اجرا می‌شود.
+**Node:** فایل `.env` وجود ندارد یا `BASE_URL` در آن تعریف نشده است. مقدار را اضافه کنید و دوباره اجرا کنید. توجه کنید این بررسی حتی هنگام import کردن `addon.js` هم اجرا می‌شود.
+
+**Workers:** مقدار `vars.BASE_URL` در `wrangler.jsonc` یا داشبورد Cloudflare را بررسی کنید.
 
 ### پیام `Port 8000 is already in use`
 
@@ -292,16 +396,25 @@ PORT=8001 npm start
 
 ### لوگو در Stremio نمایش داده نمی‌شود
 
-- مطمئن شوید `/assets/icons/logo.png` از بیرون قابل دسترسی است.
-- در استقرار پشت HTTPS، مقدار `logo` در `/manifest.json` را بررسی کنید؛ اگر `http://` بود باید trust proxy فعال شود.
+- **Node:** مطمئن شوید `/assets/icons/logo.png` از بیرون قابل دسترسی است. در استقرار پشت HTTPS، مقدار `logo` در `/manifest.json` را بررسی کنید؛ اگر `http://` بود باید `x-forwarded-proto` درست ست شود.
+- **Workers:** `https://<worker>/streams/assets/icons/logo.png` را بررسی کنید.
 
 ### لینک نصب روی صفحه اصلی هنوز localhost است
 
 صفحه `/` فقط یک صفحه کمکی است و لینک نصب آن در کد به `localhost` اشاره می‌کند. برای نسخه Deploy شده مستقیماً از آدرس عمومی خودتان استفاده کنید:
 
 ```text
+# Node
 stremio://YOUR_DOMAIN/manifest.json
+
+# Workers
+stremio://YOUR_DOMAIN/streams/manifest.json
 ```
+
+### Worker دیپلوی نمی‌شود
+
+- `CLOUDFLARE_API_TOKEN` و `CLOUDFLARE_ACCOUNT_ID` در secrets گیت‌هاب ست شده‌اند؟
+- نسخه Wrangler در workflow پین شده `4.128.0` است؛ لاگ Action را چک کنید.
 
 ---
 
@@ -309,7 +422,7 @@ stremio://YOUR_DOMAIN/manifest.json
 
 Pull Requestها و Issueها برای بهبود استخراج لینک، سازگاری با ساختارهای HTML جدید، افزودن تست و بهبود مستندات خوشحال‌کننده است.
 
-قبل از تغییر منطق استخراج، بخش‌های «نقشه تابع‌ها» و «مسائل شناخته‌شده و بدهی فنی» در [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) را مطالعه کنید؛ چند مورد کوچک و آماده برای شروع مشارکت آنجا فهرست شده‌اند.
+قبل از تغییر منطق استخراج، بخش‌های «نقشه ماژول‌ها» و «مسائل شناخته‌شده و بدهی فنی» در [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) را مطالعه کنید؛ چند مورد کوچک و آماده برای شروع مشارکت آنجا فهرست شده‌اند.
 
 ---
 
