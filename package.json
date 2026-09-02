@@ -1,6 +1,6 @@
 {
-  "name": "f2my-stremio-addon",
-  "version": "1.0.0",
+  "name": "Persian-Streams",
+  "version": "1.2.0",
   "description": "Unofficial Stremio addon for streaming content from f2my.top",
   "main": "server.js",
   "scripts": {
@@ -11,7 +11,7 @@
     "stremio",
     "addon",
     "streaming",
-    "f2my"
+    "Persian"
   ],
   "author": "",
   "license": "Apache License 2.0",
