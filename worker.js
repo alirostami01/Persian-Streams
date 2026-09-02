@@ -1,12 +1,10 @@
-import { env } from 'cloudflare:workers';
-import { createRequire } from 'node:module';
+import addonModule from './addon.js';
 
-// addon.js reads BASE_URL when it is initialized. Mirror the Worker
-// binding before loading the CommonJS addon module.
-process.env.BASE_URL = env.BASE_URL;
+// addon.js reads BASE_URL when it is initialized. Wrangler bundles the
+// CommonJS module into the Worker, so use a normal static import instead of
+// createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const require = createRequire(import.meta.url);
-const { manifest, getStreams } = require('./addon.js');
+const { manifest, getStreams } = addonModule;
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -30,19 +28,43 @@ function withAbsoluteLogo(request) {
 function parseStreamRequest(pathname) {
   const match = pathname.match(/^\/streams\/stream\/(movie|series)\/(.+?)(?:\.json)?\/?$/);
   if (!match) return null;
-  return { type: match[1], id: decodeURIComponent(match[2]) };
+
+  try {
+    return {
+      type: match[1],
+      id: decodeURIComponent(match[2]),
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
-async function handleStream(request, streamRequest) {
-  try {
-    const result = await getStreams(streamRequest.type, ...(() => {
-      const { type, id } = streamRequest;
-      if (type !== 'series') return [id, null, null];
-      const parts = id.split(':');
-      return [parts[0], parts[1] ? parseInt(parts[1], 10) : null, parts[2] ? parseInt(parts[2], 10) : null];
-    })());
+function parseStreamArgs(streamRequest) {
+  const { type, id } = streamRequest;
 
-    return json({ streams: result || [] });
+  if (type !== 'series') {
+    return [type, id, null, null];
+  }
+
+  const parts = id.split(':');
+  const imdbId = parts[0];
+  const season = parts[1] ? parseInt(parts[1], 10) : null;
+  const episode = parts[2] ? parseInt(parts[2], 10) : null;
+
+  if (!imdbId || !Number.isInteger(season) || !Number.isInteger(episode)) {
+    return null;
+  }
+
+  return [type, imdbId, season, episode];
+}
+
+async function handleStream(streamRequest) {
+  try {
+    const args = parseStreamArgs(streamRequest);
+    if (!args) return json({ streams: [] }, 400);
+
+    const streams = await getStreams(...args);
+    return json({ streams: streams || [] });
   } catch (error) {
     console.error('Worker stream handler error:', error);
     return json({ streams: [] }, 200);
@@ -50,18 +72,19 @@ async function handleStream(request, streamRequest) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    if (pathname === '/' || pathname === '/streams' || pathname === '/streams/') {
-      if (pathname === '/') {
-        return json({
-          name: manifest.name,
-          status: 'ok',
-          manifest: '/streams/manifest.json',
-        });
-      }
+    if (pathname === '/') {
+      return json({
+        name: manifest.name,
+        status: 'ok',
+        manifest: '/streams/manifest.json',
+      });
+    }
+
+    if (pathname === '/streams' || pathname === '/streams/') {
       return Response.redirect(`${url.origin}/streams/manifest.json`, 302);
     }
 
@@ -77,7 +100,7 @@ export default {
 
     const streamRequest = parseStreamRequest(pathname);
     if (streamRequest && request.method === 'GET') {
-      return handleStream(request, streamRequest);
+      return handleStream(streamRequest);
     }
 
     return json({ error: 'Not found' }, 404);
