@@ -42,7 +42,7 @@ const LOGO = '/assets/icons/logo.png';
 const builder = new addonBuilder({
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
-  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/iranian-provider-media',
+  description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
   version: '1.2.0',
   resources: ['stream'],
   types: ['movie', 'series'],
