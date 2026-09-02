@@ -1,0 +1,47 @@
+name: Deploy Streams Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'worker.js'
+      - 'stremio-builder.js'
+      - 'addon.js'
+      - 'wrangler.jsonc'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'assets/**'
+      - '.github/workflows/deploy-streams.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-streams-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy stremio-streams
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
