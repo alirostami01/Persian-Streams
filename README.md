@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icons/logo.png" alt="Iranian Provider Media" width="220" />
+  <img src="assets/icons/logo.png" alt="Persian Streams" width="220" />
 </p>
 
 <h1 align="center">Persian Streams</h1>
