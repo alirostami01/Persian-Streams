@@ -133,89 +133,129 @@ async function fetchTitleFromMeta(type, imdbId) {
 }
 
 /**
- * Resolve the real content URL via the site's quick-search endpoint using the
- * IMDB id. This is the most reliable method: we query the endpoint with the
- * IMDB code and match the returned `imdb_id` against the requested one, then
- * take that entry's `url` (works for both movies and series).
+ * Resolve the real content URL via the site's quick-search endpoint.
+ *
+ * Resolution strategy:
+ * 1. Search by IMDB id and require an exact IMDB match.
+ * 2. If the source search does not index the IMDB id (for example,
+ *    Akira: tt0094625), search by the Cinemeta title.
+ * 3. Optionally retry with title + year.
+ *
+ * Every fallback still requires an exact normalized IMDB match and a
+ * real post result, so actor/term results are never accepted.
  *
  * @returns {Promise<string|null>} final content URL or null
  */
-async function resolveViaQuickSearch(imdbId) {
-  debugLog('QUICK_SEARCH', `imdb=${imdbId}`);
-  try {
-    const qsUrl = `/quick-search?q=${encodeURIComponent(imdbId)}&sort=modified_at%3Adesc`;
-    verboseLog('QUICK_SEARCH', `request url=${qsUrl} base=${BASE_URL}`);
+async function resolveViaQuickSearch(imdbId, title = null, year = null) {
+  const normalizeImdb = value => String(value ?? '').trim().toLowerCase();
+  const requestedImdb = normalizeImdb(imdbId);
 
-    const response = await client.get(qsUrl);
-    const status = response.status;
-    const contentType = response.headers && response.headers['content-type'];
-    debugLog('QUICK_SEARCH', `status=${status}`, { contentType });
-
-    if (status !== 200) {
-      debugLog('QUICK_SEARCH', `non-200 status, failing`, { status, imdb: imdbId });
-      return null;
-    }
-
-    const data = response.data;
-    const isArray = Array.isArray(data);
-    const resultCount = isArray ? data.length : (data && typeof data === 'object' ? Object.keys(data).length : 0);
-    debugLog('QUICK_SEARCH', `result_count=${resultCount} isArray=${isArray}`);
-
-    // Handle both array response and object-wrapped response
-    let results = data;
-    if (!Array.isArray(results)) {
-      if (results && Array.isArray(results.data)) {
-        results = results.data;
-        debugLog('QUICK_SEARCH', `unwrapped data field, new count=${results.length}`);
-      } else if (results && Array.isArray(results.results)) {
-        results = results.results;
-        debugLog('QUICK_SEARCH', `unwrapped results field, new count=${results.length}`);
-      } else {
-        debugLog('QUICK_SEARCH', `response.data is not an array`, { type: typeof data, preview: JSON.stringify(data).slice(0, 300) });
-        return null;
-      }
-    }
-
-    if (resultCount > 0) {
-      const sampleIds = results.slice(0, 5).map(r => r.imdb_id || r.imdb || 'N/A');
-      verboseLog('QUICK_SEARCH', `sample imdb_ids`, { sampleIds });
-    }
-
-    const match = results.find(
-      r => (r.imdb_id || r.imdb || '').toLowerCase() === imdbId.toLowerCase()
-    );
-
-    const exactMatch = match ? JSON.stringify({ imdb_id: match.imdb_id || match.imdb, url: match.url, title: match.title || match.name }).slice(0, 300) : 'null';
-    debugLog('QUICK_SEARCH', `exact_match=${match ? 'found' : 'not_found'}`, { detail: exactMatch });
-
-    if (!match || !match.url) {
-      debugLog('QUICK_SEARCH', `no IMDB match found for ${imdbId}`);
-      return null;
-    }
-
-    // Robust absolute URL construction - handles both relative and absolute, with or without leading slash
-    let contentUrl;
-    try {
-      contentUrl = new URL(match.url, BASE_URL).toString();
-    } catch (e) {
-      // Fallback to string concat
-      contentUrl = match.url.startsWith('http')
-        ? match.url
-        : `${BASE_URL.replace(/\/$/, '')}/${match.url.replace(/^\//, '')}`;
-    }
-
-    debugLog('QUICK_SEARCH', `resolved_url=${sanitizeUrlForLog(contentUrl)}`);
-
-    if (contentUrl.includes('/profile/')) {
-      debugLog('QUICK_SEARCH', `resolved to /profile/ (not found)`);
-      return null;
-    }
-
-    return contentUrl;
-  } catch (error) {
-    debugLog('QUICK_SEARCH', `error: ${error.message}`, { stack: error.stack && error.stack.slice(0, 500) });
-    return null;
+  const queries = [imdbId];
+  if (title && String(title).trim()) {
+    queries.push(String(title).trim());
+    if (year) queries.push(`${String(title).trim()} ${year}`);
   }
+
+  for (let queryIndex = 0; queryIndex < queries.length; queryIndex += 1) {
+    const query = queries[queryIndex];
+    const mode = queryIndex === 0 ? 'imdb' : (queryIndex === 1 ? 'title' : 'title_year');
+    debugLog('QUICK_SEARCH', `query=${query} mode=${mode} imdb=${imdbId}`);
+
+    try {
+      const qsUrl = `/quick-search?q=${encodeURIComponent(query)}&sort=modified_at%3Adesc`;
+      verboseLog('QUICK_SEARCH', `request url=${qsUrl} base=${BASE_URL}`);
+
+      const response = await client.get(qsUrl);
+      const status = response.status;
+      const contentType = response.headers && response.headers['content-type'];
+      debugLog('QUICK_SEARCH', `status=${status} mode=${mode}`, { contentType });
+
+      if (status !== 200) {
+        debugLog('QUICK_SEARCH', `non-200 status`, { status, query, mode });
+        continue;
+      }
+
+      const data = response.data;
+      const isArray = Array.isArray(data);
+      const resultCount = isArray
+        ? data.length
+        : (data && typeof data === 'object' ? Object.keys(data).length : 0);
+      debugLog('QUICK_SEARCH', `result_count=${resultCount} isArray=${isArray} mode=${mode}`);
+
+      let results = data;
+      if (!Array.isArray(results)) {
+        if (results && Array.isArray(results.data)) {
+          results = results.data;
+          debugLog('QUICK_SEARCH', `unwrapped data field, new count=${results.length}`);
+        } else if (results && Array.isArray(results.results)) {
+          results = results.results;
+          debugLog('QUICK_SEARCH', `unwrapped results field, new count=${results.length}`);
+        } else {
+          debugLog('QUICK_SEARCH', `response.data is not an array`, {
+            type: typeof data,
+            preview: JSON.stringify(data).slice(0, 300)
+          });
+          continue;
+        }
+      }
+
+      if (results.length > 0) {
+        const sampleIds = results.slice(0, 5).map(r => r && (r.imdb_id || r.imdb) || 'N/A');
+        verboseLog('QUICK_SEARCH', `sample imdb_ids`, { sampleIds, mode });
+      }
+
+      const match = results.find(r => {
+        if (!r || r._kind === 'term') return false;
+        const candidateImdb = normalizeImdb(r.imdb_id || r.imdb);
+        return r._kind === 'post' && candidateImdb === requestedImdb;
+      });
+
+      const exactMatch = match
+        ? JSON.stringify({
+            imdb_id: match.imdb_id || match.imdb,
+            url: match.url,
+            title: match.title || match.name,
+            kind: match._kind
+          }).slice(0, 300)
+        : 'null';
+      debugLog('QUICK_SEARCH', `exact_match=${match ? 'found' : 'not_found'} mode=${mode}`, {
+        detail: exactMatch
+      });
+
+      if (!match || !match.url) {
+        continue;
+      }
+
+      let contentUrl;
+      try {
+        contentUrl = new URL(match.url, BASE_URL).toString();
+      } catch (e) {
+        contentUrl = String(match.url).startsWith('http')
+          ? match.url
+          : `${BASE_URL.replace(/\/$/, '')}/${String(match.url).replace(/^\//, '')}`;
+      }
+
+      debugLog('QUICK_SEARCH', `resolved_url=${sanitizeUrlForLog(contentUrl)} mode=${mode}`);
+
+      if (contentUrl.includes('/profile/')) {
+        debugLog('QUICK_SEARCH', `resolved to /profile/ (not found)`, { mode });
+        continue;
+      }
+
+      return contentUrl;
+    } catch (error) {
+      debugLog('QUICK_SEARCH', `error mode=${mode}: ${error.message}`, {
+        stack: error.stack && error.stack.slice(0, 500)
+      });
+    }
+  }
+
+  debugLog('QUICK_SEARCH', `no IMDB match found after all queries`, {
+    imdb: imdbId,
+    title,
+    year
+  });
+  return null;
 }
 
 /**
@@ -1012,7 +1052,7 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   let contentUrl = null;
 
   try {
-    contentUrl = await resolveViaQuickSearch(imdbId);
+    contentUrl = await resolveViaQuickSearch(imdbId, title, year);
   } catch (e) {
     debugLog('STREAM', `resolveViaQuickSearch threw`, { error: e.message });
   }
