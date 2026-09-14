@@ -207,7 +207,7 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null) {
       const match = results.find(r => {
         if (!r || r._kind === 'term') return false;
         const candidateImdb = normalizeImdb(r.imdb_id || r.imdb);
-        return r._kind === 'post' && candidateImdb === requestedImdb;
+        return candidateImdb === requestedImdb;
       });
 
       const exactMatch = match
