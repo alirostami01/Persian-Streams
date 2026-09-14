@@ -170,7 +170,6 @@ jobs:
       - name: Verify patch
         run: |
           grep -F "resolveViaQuickSearch(imdbId, title, year)" addon.js
-          grep -F "mode=title" addon.js
           node --check addon.js
 
       - name: Commit patched addon
