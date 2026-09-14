@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: deploy-streams-production
@@ -36,6 +36,60 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Fix duplicate displayed stream formats
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('addon.js')
+          text = path.read_text()
+          pattern = re.compile(r"  // Validate stream objects and remove duplicate URLs\\..*?\\n  return validStreams;", re.S)
+          replacement = '''  // Keep one stream for each displayed format. The source can expose
+  // the same format through multiple links, sometimes with different URLs.
+  const seenStreamFormats = new Set();
+  const validStreams = streams.filter(s => {
+    if (!s || !s.url || typeof s.url !== 'string' || !s.url.startsWith('http')) {
+      return false;
+    }
+
+    const formatIdentity = String(s.name || s.title || '')
+      .replace(/\\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+    if (!formatIdentity) return true;
+    if (seenStreamFormats.has(formatIdentity)) return false;
+
+    seenStreamFormats.add(formatIdentity);
+    return true;
+  });
+
+  if (validStreams.length !== streams.length) {
+    debugLog('STREAM', `filtered duplicate displayed formats`, {
+      original: streams.length,
+      valid_unique: validStreams.length
+    });
+  }
+
+  return validStreams;'''
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit('Expected stream deduplication block was not found exactly once')
+          path.write_text(new_text)
+          PY
+
+      - name: Commit stream deduplication fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add addon.js
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: deduplicate streams by displayed format"
+          git push
 
       - name: Install dependencies
         run: npm ci
