@@ -1,0 +1,145 @@
+name: Fix Movie File Links
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Replace movie stream parser
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('addon.js')
+          text = path.read_text()
+          start = text.index('function extractMovieStreams($) {')
+          end = text.index('\n/**\n * Main stream handler - get streams for a given content', start)
+
+          replacement = r'''function extractMovieStreams($) {
+  if (!$ || typeof $ !== 'function') {
+    debugLog('PARSER', `extractMovieStreams called with invalid $`, { type: typeof $ });
+    return [];
+  }
+
+  const streams = [];
+  const seenUrls = new Set();
+  const mediaExtensions = /\.(mkv|mp4|m3u8|avi|mov|webm)(?:$|[?#])/i;
+
+  debugLog('PARSER', `Extracting movie streams directly from page file links...`);
+
+  // Movies are different from series on the source site: a movie page can
+  // contain many independent download files in nested containers. Walking
+  // those containers causes the same <a> element to be visited multiple times.
+  // Instead, inspect every link on the page exactly once and accept every
+  // actual media filename we find.
+  $('a[href], a[onclick]').each((_, el) => {
+    const $link = $(el);
+    const href = ($link.attr('href') || '').trim();
+    const onclick = ($link.attr('onclick') || '').trim();
+    const text = $link.text().trim();
+
+    let videoUrl = href;
+    const onclickMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/i);
+    if (onclickMatch) {
+      videoUrl = onclickMatch[1];
+    }
+
+    if (!videoUrl || videoUrl === '#') return;
+
+    // Only movie file links are accepted here. This deliberately uses the
+    // filename/path extension rather than the quality label, so 480p/x264,
+    // 480p/x265, dubbed, subtitled, etc. remain separate files.
+    if (!mediaExtensions.test(videoUrl)) return;
+
+    if (!videoUrl.startsWith('http')) {
+      videoUrl = resolveUrl(videoUrl, BASE_URL);
+    }
+
+    if (!videoUrl || !videoUrl.startsWith('http')) return;
+
+    // The same physical link may appear more than once in the HTML. Remove
+    // only an exact duplicate URL; never merge different filenames/files.
+    if (seenUrls.has(videoUrl)) return;
+    seenUrls.add(videoUrl);
+
+    let filename = '';
+    try {
+      const parsed = new URL(videoUrl);
+      filename = decodeUrlPart(parsed.pathname.split('/').pop() || '');
+    } catch (_) {
+      filename = decodeUrlPart(videoUrl.split('/').pop().split('?')[0]);
+    }
+
+    if (!filename) filename = text || 'Video file';
+
+    const extensionMatch = filename.match(/\.(mkv|mp4|m3u8|avi|mov|webm)$/i);
+    const extension = extensionMatch ? extensionMatch[1].toLowerCase() : '';
+    const filenameWithoutExtension = filename.replace(/\.[^.]+$/, '').trim();
+
+    // Keep the source filename visible in Stremio. Metadata such as quality,
+    // encoder, dubbing and subtitle state is derived from the filename/text
+    // only for presentation; it is never used to deduplicate files.
+    const nearbyElement = $link.closest('li, .d-flex, .download-item, .download-list, .download-box, .dl-box')[0] || el;
+    const releaseInfo = extractReleaseInfoNearElement($, nearbyElement);
+    const fallbackContext = `${filename} ${text} ${videoUrl}`;
+    const quality = releaseInfo.quality || extractReleaseFormatFromFilename(filename) || detectQuality(videoUrl, fallbackContext);
+    const encoder = releaseInfo.encoder;
+    const subtitleStatus = releaseInfo.subtitleStatus || detectPersianSubtitleStatus(filename) || detectPersianSubtitleStatus(text);
+    const dubbedLabel = isDubbed(`${filename} ${text} ${videoUrl}`) ? ' • دوبله' : '';
+    const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+    const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+    const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+    const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+    streams.push({
+      name: streamName,
+      title: `${filenameWithoutExtension || filename}${extension ? `.${extension}` : ''}${encoderTitle}${subtitleTitlePart}`,
+      url: videoUrl
+    });
+
+    debugLog('PARSER', `Added movie file: ${filename}`, {
+      extension,
+      quality,
+      encoder,
+      url: sanitizeUrlForLog(videoUrl)
+    });
+  });
+
+  debugLog('PARSER', `movie extraction complete: ${streams.length} file(s)`);
+  return streams;
+}
+'''
+
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+
+      - name: Commit parser fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add addon.js
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: parse movie files directly from page links"
+          git push
+
+      - name: Remove temporary workflow
+        if: success()
+        run: |
+          rm -f .github/workflows/fix-movie-file-links.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/fix-movie-file-links.yml
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: remove temporary movie parser workflow"
+          git push
