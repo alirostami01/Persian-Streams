@@ -893,146 +893,80 @@ function extractMovieStreams($) {
     debugLog('PARSER', `extractMovieStreams called with invalid $`, { type: typeof $ });
     return [];
   }
+
   const streams = [];
-  debugLog('PARSER', `Extracting movie streams...`);
-  const pageReleaseInfo = extractReleaseInfoFromElement($, $('main, article, .single, .post, body').first()[0]);
+  const seenUrls = new Set();
+  const mediaExtensions = /\.(mkv|mp4|m3u8|avi|mov|webm)(?:$|[?#])/i;
 
-  const downloadListCount = $('.download-list').length;
-  const downloadBoxCount = $('.download-box').length;
-  const dlBoxCount = $('.dl-box').length;
-  const mkvLinkCount = $('a[href*=".mkv"]').length;
-  const mp4LinkCount = $('a[href*=".mp4"]').length;
-  const iframeCount = $('iframe[src]').length;
-  debugLog('PARSER', `download-list-count=${downloadListCount} download-box-count=${downloadBoxCount} dl-box-count=${dlBoxCount} mkv-link-count=${mkvLinkCount} mp4-link-count=${mp4LinkCount} iframe-count=${iframeCount}`);
+  debugLog('PARSER', `Extracting movie streams directly from page file links...`);
 
-  $('.download-list, .download-box, .dl-box').each((_, box) => {
-    const $box = $(box);
-    const qualityLabel = $box.find('.title span').first().text() || '';
+  // Movie pages can contain the same <a> inside several nested download
+  // containers. Scan each link once instead of walking overlapping containers.
+  $('a[href], a[onclick]').each((_, el) => {
+    const $link = $(el);
+    const href = ($link.attr('href') || '').trim();
+    const onclick = ($link.attr('onclick') || '').trim();
+    const text = $link.text().trim();
 
-    $box.find('a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const onclick = $(el).attr('onclick') || '';
-      const text = $(el).text().trim();
-      const combinedForFilter = `${href} ${onclick}`;
+    let videoUrl = href;
+    const onclickMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/i);
+    if (onclickMatch) videoUrl = onclickMatch[1];
 
-      // Support both direct href and onclick-based URLs (e.g., href="#" with handleDownloadClick)
-      if (!(combinedForFilter.includes('.mkv') || combinedForFilter.includes('.mp4') || combinedForFilter.includes('abrtech'))) return;
+    if (!videoUrl || videoUrl === '#') return;
+    if (!mediaExtensions.test(videoUrl)) return;
 
-      let videoUrl = href;
-      if (onclick) {
-        const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-        if (urlMatch) videoUrl = urlMatch[1];
-      }
-      // If href is empty or placeholder like "#", fallback to onclick URL
-      if (!videoUrl || videoUrl === '#' || videoUrl.trim() === '') {
-        const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-        if (urlMatch) videoUrl = urlMatch[1];
-      }
-      if (!videoUrl) return;
+    if (!videoUrl.startsWith('http')) videoUrl = resolveUrl(videoUrl, BASE_URL);
+    if (!videoUrl || !videoUrl.startsWith('http')) return;
 
-      // Ensure absolute URL
-      if (!videoUrl.startsWith('http')) {
-        videoUrl = resolveUrl(videoUrl, BASE_URL);
-      }
+    // Only exact URL duplicates are removed. Different files, even when
+    // they have the same quality, are always kept.
+    if (seenUrls.has(videoUrl)) return;
+    seenUrls.add(videoUrl);
 
-      if (!videoUrl || !videoUrl.startsWith('http')) {
-        debugLog('PARSER', `skipping invalid url`, { href, videoUrl });
-        return;
-      }
+    let filename = '';
+    try {
+      const parsed = new URL(videoUrl);
+      filename = decodeUrlPart(parsed.pathname.split('/').pop() || '');
+    } catch (_) {
+      filename = decodeUrlPart(videoUrl.split('/').pop().split('?')[0]);
+    }
 
-      const releaseElement = $(el).closest('.d-flex, li, .download-item, .download-list, .download-box, .dl-box');
-      const releaseInfo = extractReleaseInfoNearElement($, releaseElement[0] || box);
-      const boxReleaseInfo = extractReleaseInfoFromElement($, box);
-      const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
-      const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
-      const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
-      const subtitleStatus = releaseInfo.subtitleStatus || boxReleaseInfo.subtitleStatus || pageReleaseInfo.subtitleStatus;
-      // Check if the content is dubbed based on text and video URL
-      const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
-      const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
-      const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
-      const subtitleTitle = formatSubtitleLabel(subtitleStatus);
-      const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+    if (!filename) filename = text || 'Video file';
 
-      verboseLog('PARSER', `candidate quality=${quality} extension=${videoUrl.split('.').pop().split('?')[0]} encoder=${encoder} dubbed=${!!dubbedLabel} url=${sanitizeUrlForLog(videoUrl)}`);
+    const extensionMatch = filename.match(/\.(mkv|mp4|m3u8|avi|mov|webm)$/i);
+    const extension = extensionMatch ? extensionMatch[1].toLowerCase() : '';
+    const filenameWithoutExtension = filename.replace(/\.[^.]+$/, '').trim();
 
-      // Validate stream object format
-      if (!videoUrl || typeof videoUrl !== 'string' || videoUrl.length === 0) {
-        debugLog('PARSER', `skipping stream with invalid url`);
-        return;
-      }
+    // Metadata is presentation-only. It is never used for deduplication.
+    const nearbyElement = $link.closest('li, .d-flex, .download-item, .download-list, .download-box, .dl-box')[0] || el;
+    const releaseInfo = extractReleaseInfoNearElement($, nearbyElement);
+    const fallbackContext = `${filename} ${text} ${videoUrl}`;
+    const quality = releaseInfo.quality || extractReleaseFormatFromFilename(filename) || detectQuality(videoUrl, fallbackContext);
+    const encoder = releaseInfo.encoder;
+    const subtitleStatus = releaseInfo.subtitleStatus ||
+      detectPersianSubtitleStatus(filename) ||
+      detectPersianSubtitleStatus(text);
+    const dubbedLabel = isDubbed(`${filename} ${text} ${videoUrl}`) ? ' • دوبله' : '';
+    const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+    const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+    const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+    const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
 
-      streams.push({
-        name: streamName,
-        title: `${quality}${encoderTitle}${subtitleTitlePart}`,
-        url: videoUrl
-      });
+    streams.push({
+      name: streamName,
+      title: `${filenameWithoutExtension || filename}${extension ? `.${extension}` : ''}${encoderTitle}${subtitleTitlePart}`,
+      url: videoUrl
+    });
+
+    debugLog('PARSER', `Added movie file: ${filename}`, {
+      extension,
+      quality,
+      encoder,
+      url: sanitizeUrlForLog(videoUrl)
     });
   });
 
-  // Fallback: if no streams found but there are mkv links elsewhere (e.g., different HTML structure or onclick-based)
-  if (streams.length === 0) {
-    const fallbackLinks = $('a');
-    let candidateCount = 0;
-    fallbackLinks.each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const onclick = $(el).attr('onclick') || '';
-      const combined = `${href} ${onclick}`;
-      if (!(combined.includes('.mkv') || combined.includes('.mp4') || combined.includes('abrtech'))) return;
-      candidateCount++;
-    });
-    if (candidateCount > 0) {
-      debugLog('PARSER', `no streams from boxes, trying fallback link scan: ${candidateCount} candidates`);
-      fallbackLinks.each((_, el) => {
-        let href = $(el).attr('href') || '';
-        let onclick = $(el).attr('onclick') || '';
-        const combined = `${href} ${onclick}`;
-        if (!(combined.includes('.mkv') || combined.includes('.mp4') || combined.includes('abrtech'))) return;
-        let videoUrl = href;
-        if (onclick) {
-          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-          if (urlMatch) videoUrl = urlMatch[1];
-        }
-        if (!videoUrl || videoUrl === '#' || videoUrl.trim() === '') {
-          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
-          if (urlMatch) videoUrl = urlMatch[1];
-        }
-        if (!videoUrl) return;
-        if (!videoUrl.startsWith('http')) {
-          videoUrl = resolveUrl(videoUrl, BASE_URL);
-        }
-        if (!videoUrl.startsWith('http')) return;
-        const quality = detectQuality(videoUrl, $(el).text() || videoUrl);
-        const dubbedLabel = isDubbed(`${$(el).text()} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, dubbedLabel, null);
-        const existing = streams.find(s => s.url === videoUrl);
-        if (!existing) {
-          streams.push({
-            name: streamName,
-            title: quality,
-            url: videoUrl
-          });
-          debugLog('PARSER', `Added fallback stream: ${streamName}`);
-        }
-      });
-    }
-  }
-
-  $('iframe[src]').each((_, iframe) => {
-    const src = $(iframe).attr('src');
-    if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
-      let videoUrl = src;
-      if (!videoUrl.startsWith('http')) videoUrl = resolveUrl(videoUrl, BASE_URL);
-      streams.push({
-        name: `Stream`,
-        title: 'Embedded Stream',
-        url: videoUrl
-      });
-      debugLog('PARSER', `Added iframe stream: ${sanitizeUrlForLog(videoUrl)}`);
-    }
-  });
-
-  debugLog('PARSER', `movie extraction complete: ${streams.length} streams`);
+  debugLog('PARSER', `movie extraction complete: ${streams.length} file(s)`);
   return streams;
 }
 
