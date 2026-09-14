@@ -66,6 +66,44 @@ function parseStreamArgs(streamRequest) {
   return [type, imdbId, season, episode];
 }
 
+function deduplicateStreams(streams) {
+  if (!Array.isArray(streams)) return [];
+
+  const seen = new Set();
+  const unique = streams.filter(stream => {
+    if (!stream || typeof stream.url !== 'string' || !stream.url.startsWith('http')) {
+      return false;
+    }
+
+    let key = stream.url.trim();
+    try {
+      const parsed = new URL(key);
+      // Download URLs can contain temporary/signing query parameters.
+      // The pathname identifies the physical video file.
+      parsed.hash = '';
+      parsed.search = '';
+      parsed.hostname = parsed.hostname.toLowerCase();
+      key = parsed.toString().replace(/\/$/, '');
+    } catch (_) {
+      key = key.split('#')[0].split('?')[0].replace(/\/$/, '');
+    }
+
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  if (unique.length !== streams.length) {
+    debugLog('WORKER', `deduplicated streams`, {
+      original: streams.length,
+      unique: unique.length,
+      removed: streams.length - unique.length,
+    });
+  }
+
+  return unique;
+}
+
 async function handleStream(streamRequest, requestUrl) {
   const start = Date.now();
   try {
@@ -77,7 +115,7 @@ async function handleStream(streamRequest, requestUrl) {
 
     debugLog('WORKER', `stream request type=${args[0]} id=${args[1]} season=${args[2]} episode=${args[3]} url=${requestUrl}`);
 
-    const streams = await getStreams(...args);
+    const streams = deduplicateStreams(await getStreams(...args));
 
     const duration = Date.now() - start;
     debugLog('WORKER', `stream handler complete`, { imdb: args[1], streams: streams ? streams.length : 0, duration_ms: duration });
