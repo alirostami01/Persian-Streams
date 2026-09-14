@@ -13,15 +13,50 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { addonBuilder } = require('stremio-addon-sdk');
 
-const BASE_URL = process.env.BASE_URL;
-
+// Resolve BASE_URL from multiple sources (Node env, Worker env, global fallback)
+// The original code exited if not set, but for Worker compatibility and tests we fallback
+let BASE_URL = process.env.BASE_URL;
+if (!BASE_URL && typeof globalThis !== 'undefined' && globalThis.BASE_URL) {
+  BASE_URL = globalThis.BASE_URL;
+}
 if (!BASE_URL) {
-  console.error('BASE_URL is not set. Please define it in your .env file (e.g. BASE_URL=https://www.example.com)');
-  process.exit(1);
+  // Fallback to the production default used in wrangler.jsonc
+  BASE_URL = 'https://f2my.top';
+  console.warn(`[CONFIG] BASE_URL not set, falling back to ${BASE_URL}`);
+}
+
+// Diagnostic helper - clean, maintainable logging
+function debugLog(scope, message, data = {}) {
+  const hasData = data && typeof data === 'object' && Object.keys(data).length > 0;
+  if (hasData) {
+    console.log(`[${scope}] ${message}`, data);
+  } else {
+    console.log(`[${scope}] ${message}`);
+  }
+}
+
+function verboseLog(scope, message, data = {}) {
+  if (process.env.DEBUG_STREAMS === 'true' || process.env.DEBUG_STREAMS === '1') {
+    debugLog(scope, message, data);
+  }
+}
+
+function sanitizeUrlForLog(url) {
+  if (!url) return url;
+  try {
+    const u = new URL(url);
+    // Avoid logging tokens - truncate query if too long
+    if (u.search && u.search.length > 80) {
+      return u.origin + u.pathname + '?[truncated]';
+    }
+    return url;
+  } catch (_) {
+    return String(url).slice(0, 200);
+  }
 }
 
 // Create axios instance with proper headers
-const client = axios.create({
+let client = axios.create({
   baseURL: BASE_URL,
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -33,6 +68,23 @@ const client = axios.create({
   maxRedirects: 5,
   validateStatus: status => status < 500
 });
+
+function setBaseUrl(newBaseUrl) {
+  if (newBaseUrl && newBaseUrl !== BASE_URL) {
+    BASE_URL = newBaseUrl;
+    if (client && client.defaults) {
+      client.defaults.baseURL = BASE_URL;
+      if (client.defaults.headers) {
+        client.defaults.headers['Referer'] = BASE_URL;
+      }
+    }
+    debugLog('CONFIG', `BASE_URL updated to ${BASE_URL}`);
+  }
+}
+
+function getBaseUrl() {
+  return BASE_URL;
+}
 
 // Logo is served as a static file by the HTTP server (see serveHTTP static
 // option below), so it is referenced by a URL instead of being embedded.
@@ -89,52 +141,151 @@ async function fetchTitleFromMeta(type, imdbId) {
  * @returns {Promise<string|null>} final content URL or null
  */
 async function resolveViaQuickSearch(imdbId) {
+  debugLog('QUICK_SEARCH', `imdb=${imdbId}`);
   try {
     const qsUrl = `/quick-search?q=${encodeURIComponent(imdbId)}&sort=modified_at%3Adesc`;
-    console.log(`Quick-search for IMDB ${imdbId} ...`);
+    verboseLog('QUICK_SEARCH', `request url=${qsUrl} base=${BASE_URL}`);
 
     const response = await client.get(qsUrl);
-    if (response.status !== 200 || !Array.isArray(response.data)) return null;
+    const status = response.status;
+    const contentType = response.headers && response.headers['content-type'];
+    debugLog('QUICK_SEARCH', `status=${status}`, { contentType });
 
-    const match = response.data.find(
-      r => (r.imdb_id || '').toLowerCase() === imdbId.toLowerCase()
+    if (status !== 200) {
+      debugLog('QUICK_SEARCH', `non-200 status, failing`, { status, imdb: imdbId });
+      return null;
+    }
+
+    const data = response.data;
+    const isArray = Array.isArray(data);
+    const resultCount = isArray ? data.length : (data && typeof data === 'object' ? Object.keys(data).length : 0);
+    debugLog('QUICK_SEARCH', `result_count=${resultCount} isArray=${isArray}`);
+
+    // Handle both array response and object-wrapped response
+    let results = data;
+    if (!Array.isArray(results)) {
+      if (results && Array.isArray(results.data)) {
+        results = results.data;
+        debugLog('QUICK_SEARCH', `unwrapped data field, new count=${results.length}`);
+      } else if (results && Array.isArray(results.results)) {
+        results = results.results;
+        debugLog('QUICK_SEARCH', `unwrapped results field, new count=${results.length}`);
+      } else {
+        debugLog('QUICK_SEARCH', `response.data is not an array`, { type: typeof data, preview: JSON.stringify(data).slice(0, 300) });
+        return null;
+      }
+    }
+
+    if (resultCount > 0) {
+      const sampleIds = results.slice(0, 5).map(r => r.imdb_id || r.imdb || 'N/A');
+      verboseLog('QUICK_SEARCH', `sample imdb_ids`, { sampleIds });
+    }
+
+    const match = results.find(
+      r => (r.imdb_id || r.imdb || '').toLowerCase() === imdbId.toLowerCase()
     );
 
+    const exactMatch = match ? JSON.stringify({ imdb_id: match.imdb_id || match.imdb, url: match.url, title: match.title || match.name }).slice(0, 300) : 'null';
+    debugLog('QUICK_SEARCH', `exact_match=${match ? 'found' : 'not_found'}`, { detail: exactMatch });
+
     if (!match || !match.url) {
-      console.log('Quick-search: no IMDB match found');
+      debugLog('QUICK_SEARCH', `no IMDB match found for ${imdbId}`);
       return null;
     }
 
-    const contentUrl = match.url.startsWith('http')
-      ? match.url
-      : `${BASE_URL}${match.url}`;
+    // Robust absolute URL construction - handles both relative and absolute, with or without leading slash
+    let contentUrl;
+    try {
+      contentUrl = new URL(match.url, BASE_URL).toString();
+    } catch (e) {
+      // Fallback to string concat
+      contentUrl = match.url.startsWith('http')
+        ? match.url
+        : `${BASE_URL.replace(/\/$/, '')}/${match.url.replace(/^\//, '')}`;
+    }
+
+    debugLog('QUICK_SEARCH', `resolved_url=${sanitizeUrlForLog(contentUrl)}`);
 
     if (contentUrl.includes('/profile/')) {
-      console.log('Quick-search resolved to /profile/ (not found)');
+      debugLog('QUICK_SEARCH', `resolved to /profile/ (not found)`);
       return null;
     }
 
-    console.log(`Resolved via quick-search: ${contentUrl}`);
     return contentUrl;
   } catch (error) {
-    console.log(`Quick-search error: ${error.message}`);
+    debugLog('QUICK_SEARCH', `error: ${error.message}`, { stack: error.stack && error.stack.slice(0, 500) });
     return null;
   }
 }
 
 /**
- * Fetch and parse a page
+ * Fetch and parse a page with detailed diagnostics
  */
 async function fetchPage(url) {
+  if (!url) {
+    debugLog('FETCH', `url is null/empty, cannot fetch`);
+    return null;
+  }
+  debugLog('FETCH', `url=${sanitizeUrlForLog(url)}`);
   try {
     const response = await client.get(url);
-    if (response.status !== 200) {
-      console.log(`Failed to fetch: Status ${response.status}`);
+    const status = response.status;
+    const finalUrl = response.request && response.request.res && response.request.res.responseUrl
+      ? response.request.res.responseUrl
+      : (response.request && response.request.responseURL) || url;
+    const contentType = response.headers && response.headers['content-type'];
+    const body = response.data;
+    const bodyLength = body ? String(body).length : 0;
+    const isHtml = contentType && contentType.includes('text/html');
+    const bodyStr = body ? String(body) : '';
+
+    debugLog('FETCH', `status=${status}`, { final_url: sanitizeUrlForLog(finalUrl), content_type: contentType, body_length: bodyLength });
+
+    // Detect Cloudflare challenge / bot protection
+    const lowerBody = bodyStr.toLowerCase();
+    const isCloudflareChallenge = lowerBody.includes('cf-challenge') ||
+      lowerBody.includes('attention required') ||
+      lowerBody.includes('just a moment') ||
+      lowerBody.includes('checking if the site connection is secure') ||
+      lowerBody.includes('cf-browser-verification') ||
+      lowerBody.includes('cloudflare');
+
+    if (isCloudflareChallenge) {
+      debugLog('FETCH', `cloudflare challenge detected`, { url: sanitizeUrlForLog(url) });
+    }
+
+    const containsAkira = bodyStr.toLowerCase().includes('akira');
+    const containsDownloadList = bodyStr.includes('download-list');
+    const containsMkv = bodyStr.toLowerCase().includes('.mkv');
+    const containsAbrtech = bodyStr.toLowerCase().includes('abrtech');
+    debugLog('FETCH', `contains_akira=${containsAkira} contains_download_list=${containsDownloadList} contains_mkv=${containsMkv} contains_abrtech=${containsAbrtech}`);
+
+    if (status !== 200) {
+      debugLog('FETCH', `non-200 status, returning null`, { status });
       return null;
     }
-    return cheerio.load(response.data);
+
+    // Ensure we have HTML before cheerio load
+    if (!bodyStr || bodyStr.length < 100) {
+      debugLog('FETCH', `body too short or empty`, { length: bodyLength });
+      return null;
+    }
+
+    if (contentType && !contentType.includes('html') && !contentType.includes('text')) {
+      debugLog('FETCH', `unexpected content-type`, { contentType });
+      // Still try to parse if body looks like HTML
+      if (!bodyStr.includes('<html') && !bodyStr.includes('<div')) {
+        return null;
+      }
+    }
+
+    verboseLog('FETCH', `load cheerio`, { body_preview: bodyStr.slice(0, 300).replace(/\n/g, ' ') });
+    return cheerio.load(bodyStr);
   } catch (error) {
-    console.error(`Fetch error for ${url}:`, error.message);
+    const status = error.response && error.response.status;
+    const finalUrl = error.response && error.response.request && error.response.request.res && error.response.request.res.responseUrl;
+    debugLog('FETCH', `fetch error for ${sanitizeUrlForLog(url)}: ${error.message}`, { status, final_url: finalUrl ? sanitizeUrlForLog(finalUrl) : undefined });
+    verboseLog('FETCH', `error stack`, { stack: error.stack && error.stack.slice(0, 800) });
     return null;
   }
 }
@@ -461,7 +612,7 @@ async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, target
   const streams = [];
 
   try {
-    console.log(`Fetching legacy season directory: ${seasonUrl}`);
+    debugLog('LEGACY', `Fetching legacy season directory: ${sanitizeUrlForLog(seasonUrl)}`);
     const response = await axios.get(seasonUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -473,7 +624,7 @@ async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, target
     });
 
     if (response.status !== 200) {
-      console.log(`Legacy season directory returned status ${response.status}`);
+      debugLog('LEGACY', `season directory returned status ${response.status}`);
       return streams;
     }
 
@@ -501,16 +652,20 @@ async function extractStreamsFromSeasonDirectory(seasonUrl, targetSeason, target
         title: `S${targetSeason}E${targetEpisode} - ${quality}${subtitleTitlePart}`,
         url: videoUrl
       });
-      console.log(`Added legacy directory stream: ${streamName}`);
+      debugLog('LEGACY', `Added legacy directory stream: ${streamName} url=${sanitizeUrlForLog(videoUrl)}`);
     });
   } catch (error) {
-    console.log(`Legacy season directory error: ${error.message}`);
+    debugLog('LEGACY', `season directory error: ${error.message}`);
   }
 
   return streams;
 }
 
 async function extractLegacySeriesStreams($, targetSeason, targetEpisode) {
+  if (!$) {
+    debugLog('PARSER', `extractLegacySeriesStreams called with null $`);
+    return [];
+  }
   const seasonLinks = [];
   const pageSubtitleStatus = detectPersianSubtitleStatus($('main, article, .single, .post, body').first().text());
 
@@ -532,6 +687,8 @@ async function extractLegacySeriesStreams($, targetSeason, targetEpisode) {
     if (!seasonLinks.includes(absoluteUrl)) seasonLinks.push(absoluteUrl);
   });
 
+  debugLog('PARSER', `legacy season links found: ${seasonLinks.length}`);
+
   const streams = [];
   for (const seasonUrl of seasonLinks) {
     const directoryStreams = await extractStreamsFromSeasonDirectory(
@@ -550,9 +707,16 @@ async function extractLegacySeriesStreams($, targetSeason, targetEpisode) {
  * Extract streams from series page for specific season/episode
  */
 async function extractSeriesStreams($, targetSeason, targetEpisode) {
+  if (!$ || typeof $ !== 'function') {
+    debugLog('PARSER', `extractSeriesStreams called with invalid $`, { type: typeof $ });
+    return [];
+  }
   const streams = [];
   const targetEpNum = parseInt(targetEpisode, 10);
 
+  const downloadSeasonCount = $('.download-season').length;
+  const dflexCount = $('.series-downloaditems .d-flex').length;
+  debugLog('PARSER', `series download-season-count=${downloadSeasonCount} d-flex-count=${dflexCount}`);
 
   $('.download-season').each((seasonIdx, seasonEl) => {
     const $seasonEl = $(seasonEl);
@@ -581,7 +745,7 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
 
     if (parseInt(targetSeason, 10) !== seasonNum) return;
 
-    console.log(`Found matching season container (Season ${seasonNum})`);
+    debugLog('PARSER', `Found matching season container (Season ${seasonNum})`);
 
     const episodeItems = $seasonEl.find('.series-downloaditems .d-flex');
 
@@ -609,7 +773,7 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
 
       if (epNum !== targetEpNum) return;
 
-      console.log(`Found matching episode ${epNum}`);
+      debugLog('PARSER', `Found matching episode ${epNum}`);
 
       let videoUrl = null;
 
@@ -643,6 +807,10 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
       }
 
       if (videoUrl) {
+        // Ensure absolute URL
+        if (!videoUrl.startsWith('http')) {
+          videoUrl = resolveUrl(videoUrl, BASE_URL);
+        }
         const releaseInfo = extractReleaseInfoNearElement($, epEl);
         const fallbackContext = `${buttonText} ${$epEl.text()} ${videoUrl}`;
         const quality = releaseInfo.quality || detectQuality(videoUrl, fallbackContext);
@@ -655,21 +823,25 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
         const subtitleTitle = formatSubtitleLabel(subtitleStatus);
         const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
 
+        verboseLog('PARSER', `candidate quality=${quality} encoder=${encoder} dubbed=${!!dubbedLabel} url=${sanitizeUrlForLog(videoUrl)}`);
+
         streams.push({
           name: streamName,
           title: `S${targetSeason}E${targetEpisode} - ${quality}${encoderTitle}${subtitleTitlePart}`,
           url: videoUrl
         });
-        console.log(`Added stream: ${streamName}`);
+        debugLog('PARSER', `Added stream: ${streamName}`);
       }
     });
   });
 
   if (streams.length === 0) {
+    debugLog('PARSER', `no streams from main selector, trying legacy fallback`);
     const legacyStreams = await extractLegacySeriesStreams($, targetSeason, targetEpisode);
     streams.push(...legacyStreams);
   }
 
+  debugLog('PARSER', `series extraction complete: ${streams.length} streams`);
   return streams;
 }
 
@@ -677,61 +849,150 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
  * Extract streams from movie page
  */
 function extractMovieStreams($) {
+  if (!$ || typeof $ !== 'function') {
+    debugLog('PARSER', `extractMovieStreams called with invalid $`, { type: typeof $, isNull: $ === null });
+    return [];
+  }
   const streams = [];
-  console.log('Extracting movie streams...');
+  debugLog('PARSER', `Extracting movie streams...`);
   const pageReleaseInfo = extractReleaseInfoFromElement($, $('main, article, .single, .post, body').first()[0]);
+
+  const downloadListCount = $('.download-list').length;
+  const downloadBoxCount = $('.download-box').length;
+  const dlBoxCount = $('.dl-box').length;
+  const mkvLinkCount = $('a[href*=".mkv"]').length;
+  const mp4LinkCount = $('a[href*=".mp4"]').length;
+  const iframeCount = $('iframe[src]').length;
+  debugLog('PARSER', `download-list-count=${downloadListCount} download-box-count=${downloadBoxCount} dl-box-count=${dlBoxCount} mkv-link-count=${mkvLinkCount} mp4-link-count=${mp4LinkCount} iframe-count=${iframeCount}`);
 
   $('.download-list, .download-box, .dl-box').each((_, box) => {
     const $box = $(box);
     const qualityLabel = $box.find('.title span').first().text() || '';
 
-    $box.find('a[href*=".mkv"], a[href*=".mp4"], a[href*="http"]').each((_, el) => {
-      const href = $(el).attr('href');
+    $box.find('a').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const onclick = $(el).attr('onclick') || '';
       const text = $(el).text().trim();
+      const combinedForFilter = `${href} ${onclick}`;
 
-      if (href && (href.includes('.mkv') || href.includes('.mp4') || href.includes('abrtech'))) {
-        const onclick = $(el).attr('onclick');
+      // Support both direct href and onclick-based URLs (e.g., href="#" with handleDownloadClick)
+      if (!(combinedForFilter.includes('.mkv') || combinedForFilter.includes('.mp4') || combinedForFilter.includes('abrtech'))) return;
+
+      let videoUrl = href;
+      if (onclick) {
+        const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+        if (urlMatch) videoUrl = urlMatch[1];
+      }
+      // If href is empty or placeholder like "#", fallback to onclick URL
+      if (!videoUrl || videoUrl === '#' || videoUrl.trim() === '') {
+        const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+        if (urlMatch) videoUrl = urlMatch[1];
+      }
+      if (!videoUrl) return;
+
+      // Ensure absolute URL
+      if (!videoUrl.startsWith('http')) {
+        videoUrl = resolveUrl(videoUrl, BASE_URL);
+      }
+
+      if (!videoUrl || !videoUrl.startsWith('http')) {
+        debugLog('PARSER', `skipping invalid url`, { href, videoUrl });
+        return;
+      }
+
+      const releaseElement = $(el).closest('.d-flex, li, .download-item, .download-list, .download-box, .dl-box');
+      const releaseInfo = extractReleaseInfoNearElement($, releaseElement[0] || box);
+      const boxReleaseInfo = extractReleaseInfoFromElement($, box);
+      const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
+      const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
+      const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
+      const subtitleStatus = releaseInfo.subtitleStatus || boxReleaseInfo.subtitleStatus || pageReleaseInfo.subtitleStatus;
+      // Check if the content is dubbed based on text and video URL
+      const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
+      const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
+      const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
+      const subtitleTitle = formatSubtitleLabel(subtitleStatus);
+      const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
+
+      verboseLog('PARSER', `candidate quality=${quality} extension=${videoUrl.split('.').pop().split('?')[0]} encoder=${encoder} dubbed=${!!dubbedLabel} url=${sanitizeUrlForLog(videoUrl)}`);
+
+      // Validate stream object format
+      if (!videoUrl || typeof videoUrl !== 'string' || videoUrl.length === 0) {
+        debugLog('PARSER', `skipping stream with invalid url`);
+        return;
+      }
+
+      streams.push({
+        name: streamName,
+        title: `${quality}${encoderTitle}${subtitleTitlePart}`,
+        url: videoUrl
+      });
+    });
+  });
+
+  // Fallback: if no streams found but there are mkv links elsewhere (e.g., different HTML structure or onclick-based)
+  if (streams.length === 0) {
+    const fallbackLinks = $('a');
+    let candidateCount = 0;
+    fallbackLinks.each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const onclick = $(el).attr('onclick') || '';
+      const combined = `${href} ${onclick}`;
+      if (!(combined.includes('.mkv') || combined.includes('.mp4') || combined.includes('abrtech'))) return;
+      candidateCount++;
+    });
+    if (candidateCount > 0) {
+      debugLog('PARSER', `no streams from boxes, trying fallback link scan: ${candidateCount} candidates`);
+      fallbackLinks.each((_, el) => {
+        let href = $(el).attr('href') || '';
+        let onclick = $(el).attr('onclick') || '';
+        const combined = `${href} ${onclick}`;
+        if (!(combined.includes('.mkv') || combined.includes('.mp4') || combined.includes('abrtech'))) return;
         let videoUrl = href;
-
         if (onclick) {
           const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
           if (urlMatch) videoUrl = urlMatch[1];
         }
-
-        const releaseElement = $(el).closest('.d-flex, li, .download-item, .download-list, .download-box, .dl-box');
-        const releaseInfo = extractReleaseInfoNearElement($, releaseElement[0] || box);
-        const boxReleaseInfo = extractReleaseInfoFromElement($, box);
-        const fallbackContext = `${qualityLabel} ${releaseElement.text()} ${text} ${videoUrl}`;
-        const quality = releaseInfo.quality || boxReleaseInfo.quality || detectQuality(videoUrl, fallbackContext);
-        const encoder = releaseInfo.encoder || boxReleaseInfo.encoder;
-        const subtitleStatus = releaseInfo.subtitleStatus || boxReleaseInfo.subtitleStatus || pageReleaseInfo.subtitleStatus;
-        // Check if the content is dubbed based on text and video URL
-        const dubbedLabel = isDubbed(`${releaseElement.text()} ${text} ${videoUrl}`) ? ' • دوبله' : '';
-        const streamName = buildStreamName(quality, dubbedLabel, subtitleStatus);
-        const encoderTitle = encoder ? ` • encoder: ${encoder}` : '';
-        const subtitleTitle = formatSubtitleLabel(subtitleStatus);
-        const subtitleTitlePart = subtitleTitle ? ` • ${subtitleTitle}` : '';
-
-        streams.push({
-          name: streamName,
-          title: `${quality}${encoderTitle}${subtitleTitlePart}`,
-          url: videoUrl
-        });
-      }
-    });
-  });
+        if (!videoUrl || videoUrl === '#' || videoUrl.trim() === '') {
+          const urlMatch = onclick.match(/handleDownloadClick\(['"]([^'"]+)['"]/);
+          if (urlMatch) videoUrl = urlMatch[1];
+        }
+        if (!videoUrl) return;
+        if (!videoUrl.startsWith('http')) {
+          videoUrl = resolveUrl(videoUrl, BASE_URL);
+        }
+        if (!videoUrl.startsWith('http')) return;
+        const quality = detectQuality(videoUrl, $(el).text() || videoUrl);
+        const dubbedLabel = isDubbed(`${$(el).text()} ${videoUrl}`) ? ' • دوبله' : '';
+        const streamName = buildStreamName(quality, dubbedLabel, null);
+        const existing = streams.find(s => s.url === videoUrl);
+        if (!existing) {
+          streams.push({
+            name: streamName,
+            title: quality,
+            url: videoUrl
+          });
+          debugLog('PARSER', `Added fallback stream: ${streamName}`);
+        }
+      });
+    }
+  }
 
   $('iframe[src]').each((_, iframe) => {
     const src = $(iframe).attr('src');
     if (src && (src.includes('.mp4') || src.includes('.m3u8'))) {
+      let videoUrl = src;
+      if (!videoUrl.startsWith('http')) videoUrl = resolveUrl(videoUrl, BASE_URL);
       streams.push({
         name: `Stream`,
         title: 'Embedded Stream',
-        url: src
+        url: videoUrl
       });
+      debugLog('PARSER', `Added iframe stream: ${sanitizeUrlForLog(videoUrl)}`);
     }
   });
 
+  debugLog('PARSER', `movie extraction complete: ${streams.length} streams`);
   return streams;
 }
 
@@ -739,30 +1000,65 @@ function extractMovieStreams($) {
  * Main stream handler - get streams for a given content
  */
 async function getStreams(type, imdbId, season = null, episode = null) {
-  console.log('\n=== Stream Request ===');
-  console.log(`Type: ${type}, IMDB: ${imdbId}, Season: ${season}, Episode: ${episode}`);
+  debugLog('STREAM', `Request type=${type} imdb=${imdbId} season=${season} episode=${episode}`);
+  verboseLog('STREAM', `BASE_URL=${BASE_URL}`);
 
   // Resolve the metadata title (and year) from Stremio's cinemeta service.
   const meta = await fetchTitleFromMeta(type, imdbId);
   const title = meta ? meta.name : null;
   const year = meta ? meta.year : null;
+  if (title) verboseLog('STREAM', `meta title=${title} year=${year}`);
 
   let contentUrl = null;
 
-  contentUrl = await resolveViaQuickSearch(imdbId);
-
-  let $ = await fetchPage(contentUrl);
-
-  let streams = [];
-  if (type === 'series' && season !== null && episode !== null) {
-    console.log(`Looking for Season ${season}, Episode ${episode}`);
-    streams = await extractSeriesStreams($, season, episode);
-  } else if (type === 'movie') {
-    streams = extractMovieStreams($);
+  try {
+    contentUrl = await resolveViaQuickSearch(imdbId);
+  } catch (e) {
+    debugLog('STREAM', `resolveViaQuickSearch threw`, { error: e.message });
   }
 
-  console.log(`Found ${streams.length} stream(s)`);
-  return streams;
+  if (!contentUrl) {
+    debugLog('STREAM', `Failed to resolve content URL for ${imdbId}, returning empty streams`);
+    return [];
+  }
+
+  debugLog('STREAM', `contentUrl resolved: ${sanitizeUrlForLog(contentUrl)}`);
+
+  let $ = null;
+  try {
+    $ = await fetchPage(contentUrl);
+  } catch (e) {
+    debugLog('STREAM', `fetchPage threw`, { error: e.message });
+    return [];
+  }
+
+  if (!$) {
+    debugLog('STREAM', `Failed to fetch content page: ${sanitizeUrlForLog(contentUrl)}, returning empty streams`);
+    return [];
+  }
+
+  let streams = [];
+  try {
+    if (type === 'series' && season !== null && episode !== null) {
+      debugLog('STREAM', `Looking for Season ${season}, Episode ${episode}`);
+      streams = await extractSeriesStreams($, season, episode);
+    } else if (type === 'movie') {
+      streams = extractMovieStreams($);
+    } else {
+      debugLog('STREAM', `Unknown type or missing season/episode`, { type, season, episode });
+    }
+  } catch (e) {
+    debugLog('STREAM', `parser threw`, { error: e.message, stack: e.stack && e.stack.slice(0, 800) });
+    return [];
+  }
+
+  debugLog('STREAM', `Found ${streams.length} stream(s) for ${imdbId}`);
+  // Validate stream objects
+  const validStreams = streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http'));
+  if (validStreams.length !== streams.length) {
+    debugLog('STREAM', `filtered invalid streams`, { original: streams.length, valid: validStreams.length });
+  }
+  return validStreams;
 }
 
 // Define stream handler
@@ -777,15 +1073,17 @@ builder.defineStreamHandler((args) => {
     imdbId = parts[0];
     season = parts[1] ? parseInt(parts[1], 10) : null;
     episode = parts[2] ? parseInt(parts[2], 10) : null;
-    console.log(`\nSeries request: ${imdbId}, S${season}E${episode}`);
+    debugLog('HANDLER', `Series request: ${imdbId}, S${season}E${episode}`);
   } else {
-    console.log(`\nMovie request: ${imdbId}`);
+    debugLog('HANDLER', `Movie request: ${imdbId}`);
   }
 
   return getStreams(type, imdbId, season, episode)
     .then(streams => ({ streams }))
     .catch(error => {
-      console.error('Handler error:', error);
+      console.error(`[HANDLER] Handler error: ${error.message}`, { stack: error.stack && error.stack.slice(0, 800) });
+      // Preserve error reason in logs but still return empty streams to Stremio
+      debugLog('HANDLER', `returning empty streams due to error`, { error: error.message });
       return { streams: [] };
     });
 });
@@ -796,6 +1094,17 @@ const addonInterface = builder.getInterface();
 // getStreams directly and does not load the legacy Express runtime.
 module.exports = {
   ...addonInterface,
-  getStreams
+  getStreams,
+  // Exported for testing and diagnostics
+  resolveViaQuickSearch,
+  fetchPage,
+  extractMovieStreams,
+  extractSeriesStreams,
+  detectQuality,
+  extractReleaseInfoFromElement,
+  setBaseUrl,
+  getBaseUrl,
+  debugLog,
+  client
 };
 

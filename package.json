@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "publish:central": "node publishToCentral.js"
+    "publish:central": "node publishToCentral.js",
+    "test": "node --test tests/*.test.js",
+    "test:verbose": "node --test --test-reporter=spec tests/*.test.js"
   },
   "keywords": [
     "stremio",
