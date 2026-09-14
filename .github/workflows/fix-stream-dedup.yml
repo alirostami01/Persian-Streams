@@ -1,0 +1,116 @@
+name: Fix Stream Deduplication
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Strengthen stream deduplication
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('addon.js')
+          text = path.read_text()
+
+          pattern = re.compile(
+              r"  // Validate stream objects and remove duplicate URLs\..*?\n  return validStreams;",
+              re.S,
+          )
+
+          replacement = '''  // Validate stream objects and remove duplicate physical files.
+  // Source pages can expose the same file more than once with different
+  // query parameters (tokens, cache-busters, download flags, etc.). Exact
+  // URL comparison is therefore not sufficient.
+  const seenStreamIdentities = new Set();
+  const validStreams = streams.filter(s => {
+    if (!s || !s.url || typeof s.url !== 'string' || !s.url.startsWith('http')) {
+      return false;
+    }
+
+    let identity = s.url;
+    try {
+      const parsed = new URL(s.url);
+      parsed.hash = '';
+
+      // For real media files, the origin + decoded pathname identifies the
+      // physical file while ignoring transient query parameters.
+      const pathname = decodeURIComponent(parsed.pathname)
+        .replace(/\\/+$/, '')
+        .toLowerCase();
+      const filename = pathname.split('/').pop() || '';
+
+      if (/\\.(?:mkv|mp4|m3u8|avi|mov|webm)$/i.test(filename)) {
+        identity = `${parsed.origin.toLowerCase()}${pathname}`;
+      } else {
+        // For non-file media/proxy URLs keep meaningful query parameters,
+        // but ignore common transient download/auth/cache parameters.
+        const transientParams = new Set([
+          'token', 'auth', 'signature', 'sig', 'expires', 'expiry',
+          'expires_at', 'timestamp', 'ts', 'cache', 'cachebust',
+          'cache_bust', 'download', 'download_id'
+        ]);
+        const params = [...parsed.searchParams.entries()]
+          .filter(([key]) => !transientParams.has(key.toLowerCase()))
+          .sort(([a], [b]) => a.localeCompare(b));
+        const query = new URLSearchParams(params).toString();
+        identity = `${parsed.origin.toLowerCase()}${pathname}${query ? `?${query}` : ''}`;
+      }
+    } catch (_) {
+      identity = s.url.split('#')[0];
+    }
+
+    if (seenStreamIdentities.has(identity)) {
+      return false;
+    }
+
+    seenStreamIdentities.add(identity);
+    return true;
+  });
+
+  if (validStreams.length !== streams.length) {
+    debugLog('STREAM', `filtered duplicate/invalid streams`, {
+      original: streams.length,
+      valid_unique: validStreams.length
+    });
+  }
+
+  return validStreams;'''
+
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit('Expected stream deduplication block was not found exactly once')
+          path.write_text(new_text)
+          PY
+
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add addon.js
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: deduplicate physical stream files"
+          git push
+
+      - name: Remove temporary workflow
+        if: success()
+        run: |
+          rm -f .github/workflows/fix-stream-dedup.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/fix-stream-dedup.yml
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: remove temporary dedup workflow"
+          git push
