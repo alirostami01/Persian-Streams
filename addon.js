@@ -778,7 +778,7 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
       }
     }
 
-    const digitSeasonMatch = buttonText.match(/(?:season|fصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+    const digitSeasonMatch = buttonText.match(/(?:season|فصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
     if (digitSeasonMatch) {
       seasonNum = parseInt(digitSeasonMatch[1], 10);
     }
@@ -890,7 +890,7 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
  */
 function extractMovieStreams($) {
   if (!$ || typeof $ !== 'function') {
-    debugLog('PARSER', `extractMovieStreams called with invalid $`, { type: typeof $, isNull: $ === null });
+    debugLog('PARSER', `extractMovieStreams called with invalid $`, { type: typeof $ });
     return [];
   }
   const streams = [];
@@ -1093,11 +1093,32 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   }
 
   debugLog('STREAM', `Found ${streams.length} stream(s) for ${imdbId}`);
-  // Validate stream objects
-  const validStreams = streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http'));
+
+  // Validate stream objects and remove duplicate URLs. Some source pages
+  // expose the same download link through nested/overlapping containers, so
+  // the parser can encounter one physical file more than once.
+  const seenUrls = new Set();
+  const validStreams = streams.filter(s => {
+    if (!s || !s.url || typeof s.url !== 'string' || !s.url.startsWith('http')) {
+      return false;
+    }
+
+    if (seenUrls.has(s.url)) {
+      return false;
+    }
+
+    seenUrls.add(s.url);
+    return true;
+  });
+
+  const duplicateCount = streams.length - validStreams.length - streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http')).length + streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http')).length;
   if (validStreams.length !== streams.length) {
-    debugLog('STREAM', `filtered invalid streams`, { original: streams.length, valid: validStreams.length });
+    debugLog('STREAM', `filtered duplicate/invalid streams`, {
+      original: streams.length,
+      valid_unique: validStreams.length
+    });
   }
+
   return validStreams;
 }
 
@@ -1118,33 +1139,17 @@ builder.defineStreamHandler((args) => {
     debugLog('HANDLER', `Movie request: ${imdbId}`);
   }
 
-  return getStreams(type, imdbId, season, episode)
-    .then(streams => ({ streams }))
-    .catch(error => {
-      console.error(`[HANDLER] Handler error: ${error.message}`, { stack: error.stack && error.stack.slice(0, 800) });
-      // Preserve error reason in logs but still return empty streams to Stremio
-      debugLog('HANDLER', `returning empty streams due to error`, { error: error.message });
-      return { streams: [] };
-    });
+  return getStreams(type, imdbId, season, episode);
 });
 
-const addonInterface = builder.getInterface();
-
-// Export the SDK interface plus the pure stream function. The Worker uses
-// getStreams directly and does not load the legacy Express runtime.
 module.exports = {
-  ...addonInterface,
+  manifest: builder.getManifest(),
   getStreams,
-  // Exported for testing and diagnostics
+  setBaseUrl,
+  getBaseUrl,
+  fetchTitleFromMeta,
   resolveViaQuickSearch,
   fetchPage,
   extractMovieStreams,
-  extractSeriesStreams,
-  detectQuality,
-  extractReleaseInfoFromElement,
-  setBaseUrl,
-  getBaseUrl,
-  debugLog,
-  client
+  extractSeriesStreams
 };
-
