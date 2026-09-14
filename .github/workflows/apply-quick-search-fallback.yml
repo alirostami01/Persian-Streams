@@ -1,5 +1,6 @@
 name: Apply Quick Search Fallback
 
+# Trigger patch workflow after installation
 on:
   push:
     branches:
