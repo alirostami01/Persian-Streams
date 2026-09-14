@@ -1143,7 +1143,7 @@ builder.defineStreamHandler((args) => {
 });
 
 module.exports = {
-  manifest: builder.getManifest(),
+  manifest: builder.manifest,
   getStreams,
   setBaseUrl,
   getBaseUrl,
