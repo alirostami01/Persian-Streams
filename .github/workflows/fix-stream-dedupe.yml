@@ -1,0 +1,104 @@
+name: Fix Stream Deduplication
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fix stream deduplication
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('addon.js')
+          s = p.read_text()
+
+          old = '''  // Validate stream objects and remove duplicate URLs. Some source pages
+  // expose the same download link through nested/overlapping containers, so
+  // the parser can encounter one physical file more than once.
+  const seenUrls = new Set();
+  const validStreams = streams.filter(s => {
+    if (!s || !s.url || typeof s.url !== 'string' || !s.url.startsWith('http')) {
+      return false;
+    }
+
+    if (seenUrls.has(s.url)) {
+      return false;
+    }
+
+    seenUrls.add(s.url);
+    return true;
+  });
+
+  const duplicateCount = streams.length - validStreams.length - streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http')).length + streams.filter(s => s && s.url && typeof s.url === 'string' && s.url.startsWith('http')).length;
+  if (validStreams.length !== streams.length) {
+    debugLog('STREAM', `filtered duplicate/invalid streams`, {
+      original: streams.length,
+      valid_unique: validStreams.length
+    });
+  }
+
+  return validStreams;'''
+
+          new = '''  // Validate stream objects and remove duplicate physical files.
+  // Some source pages expose the same file through nested containers, or
+  // generate the same file URL with different query parameters/tokens.
+  const seenStreamKeys = new Set();
+  const validStreams = streams.filter(s => {
+    if (!s || !s.url || typeof s.url !== 'string' || !s.url.startsWith('http')) {
+      return false;
+    }
+
+    let streamKey = s.url.trim();
+    try {
+      const parsed = new URL(streamKey);
+      // Query strings on these download URLs can contain temporary/signing
+      // parameters. The pathname identifies the actual physical video file.
+      parsed.hash = '';
+      parsed.search = '';
+      parsed.hostname = parsed.hostname.toLowerCase();
+      streamKey = parsed.toString().replace(/\\/$/, '');
+    } catch (_) {
+      streamKey = streamKey.split('#')[0].split('?')[0].replace(/\\/$/, '');
+    }
+
+    if (seenStreamKeys.has(streamKey)) {
+      return false;
+    }
+
+    seenStreamKeys.add(streamKey);
+    return true;
+  });
+
+  if (validStreams.length !== streams.length) {
+    debugLog('STREAM', `filtered duplicate/invalid streams`, {
+      original: streams.length,
+      valid_unique: validStreams.length,
+      removed: streams.length - validStreams.length
+    });
+  }
+
+  return validStreams;'''
+
+          if old not in s:
+              raise SystemExit('Target deduplication block not found')
+
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Commit fix and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/fix-stream-dedupe.yml
+          git add addon.js .github/workflows/fix-stream-dedupe.yml
+          git diff --cached --quiet || git commit -m "fix: deduplicate streams by physical file"
+          git push
