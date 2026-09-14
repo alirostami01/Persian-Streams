@@ -4,7 +4,15 @@ import addonModule from './addon.js';
 // CommonJS module into the Worker, so use a normal static import instead of
 // createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const { manifest, getStreams } = addonModule;
+const { manifest, getStreams, setBaseUrl, getBaseUrl } = addonModule;
+
+function debugLog(scope, message, data) {
+  if (data !== undefined) {
+    console.log(`[${scope}] ${message}`, data);
+  } else {
+    console.log(`[${scope}] ${message}`);
+  }
+}
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -58,23 +66,69 @@ function parseStreamArgs(streamRequest) {
   return [type, imdbId, season, episode];
 }
 
-async function handleStream(streamRequest) {
+async function handleStream(streamRequest, requestUrl) {
+  const start = Date.now();
   try {
     const args = parseStreamArgs(streamRequest);
-    if (!args) return json({ streams: [] }, 400);
+    if (!args) {
+      debugLog('WORKER', `invalid stream args`, { streamRequest });
+      return json({ streams: [] }, 400);
+    }
+
+    debugLog('WORKER', `stream request type=${args[0]} id=${args[1]} season=${args[2]} episode=${args[3]} url=${requestUrl}`);
 
     const streams = await getStreams(...args);
+
+    const duration = Date.now() - start;
+    debugLog('WORKER', `stream handler complete`, { imdb: args[1], streams: streams ? streams.length : 0, duration_ms: duration });
+
+    // Ensure we never lose the reason for empty streams - logs already emitted in getStreams/quick-search/fetch
+    if (!streams || streams.length === 0) {
+      debugLog('WORKER', `returning empty streams`, { imdb: args[1], type: args[0] });
+    }
+
     return json({ streams: streams || [] });
   } catch (error) {
-    console.error('Worker stream handler error:', error);
+    console.error('[WORKER] stream handler error:', error.message, { stack: error.stack && error.stack.slice(0, 800) });
+    debugLog('WORKER', `returning empty streams due to handler error`, { error: error.message });
     return json({ streams: [] }, 200);
   }
 }
 
 export default {
   async fetch(request, env) {
+    // Inject BASE_URL from Worker env into addon module (handles both f2my.top and www.f2my.top)
+    try {
+      const envBase = env && (env.BASE_URL || env.base_url);
+      if (envBase) {
+        // Update runtime BASE_URL for subsequent requests
+        if (typeof setBaseUrl === 'function') {
+          setBaseUrl(envBase);
+        }
+        // Also set on process.env for any direct reads
+        try {
+          if (typeof process !== 'undefined' && process.env) {
+            process.env.BASE_URL = envBase;
+          }
+        } catch (_) {}
+        try {
+          if (typeof globalThis !== 'undefined') {
+            globalThis.BASE_URL = envBase;
+          }
+        } catch (_) {}
+      } else {
+        // Log current BASE_URL for diagnostics
+        const current = typeof getBaseUrl === 'function' ? getBaseUrl() : 'unknown';
+        debugLog('WORKER', `no env.BASE_URL, using current`, { baseUrl: current });
+      }
+    } catch (e) {
+      console.error('[WORKER] BASE_URL injection failed', e.message);
+    }
+
     const url = new URL(request.url);
     const { pathname } = url;
+
+    debugLog('WORKER', `incoming ${request.method} ${pathname}`);
 
     if (pathname === '/') {
       return json({
@@ -100,9 +154,10 @@ export default {
 
     const streamRequest = parseStreamRequest(pathname);
     if (streamRequest && request.method === 'GET') {
-      return handleStream(streamRequest);
+      return handleStream(streamRequest, request.url);
     }
 
+    debugLog('WORKER', `404 not found`, { pathname });
     return json({ error: 'Not found' }, 404);
   },
 };
