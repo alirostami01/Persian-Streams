@@ -21,7 +21,7 @@ if (!BASE_URL && typeof globalThis !== 'undefined' && globalThis.BASE_URL) {
 }
 if (!BASE_URL) {
   // Fallback to the production default used in wrangler.jsonc
-  BASE_URL = 'https://f2my.top';
+  BASE_URL = 'https://www.f2mc.top';
   console.warn(`[CONFIG] BASE_URL not set, falling back to ${BASE_URL}`);
 }
 

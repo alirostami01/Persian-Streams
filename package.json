@@ -1,7 +1,7 @@
 {
   "name": "Persian-Streams",
   "version": "1.2.0",
-  "description": "Unofficial Stremio addon for streaming content from f2my.top",
+  "description": "Unofficial Stremio addon for streaming content from f2mc.top",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
