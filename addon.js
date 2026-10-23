@@ -59,10 +59,9 @@ function sanitizeUrlForLog(url) {
 let client = axios.create({
   baseURL: BASE_URL,
   headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': BASE_URL,
+    'Accept-Language': 'en-US,en;q=0.9',
   },
   timeout: 15000,
   maxRedirects: 5,
@@ -74,9 +73,6 @@ function setBaseUrl(newBaseUrl) {
     BASE_URL = newBaseUrl;
     if (client && client.defaults) {
       client.defaults.baseURL = BASE_URL;
-      if (client.defaults.headers) {
-        client.defaults.headers['Referer'] = BASE_URL;
-      }
     }
     debugLog('CONFIG', `BASE_URL updated to ${BASE_URL}`);
   }
@@ -146,9 +142,17 @@ async function fetchTitleFromMeta(type, imdbId) {
  *
  * @returns {Promise<string|null>} final content URL or null
  */
-async function resolveViaQuickSearch(imdbId, title = null, year = null) {
+async function resolveViaQuickSearch(imdbId, title = null, year = null, expectedType = null) {
   const normalizeImdb = value => String(value ?? '').trim().toLowerCase();
   const requestedImdb = normalizeImdb(imdbId);
+
+  const isTypeMatch = item => {
+    if (!item) return false;
+    const isSeries = item.type === 'series' || (item.url && item.url.startsWith('/series/'));
+    if (expectedType === 'series') return isSeries;
+    if (expectedType === 'movie') return !isSeries;
+    return true;
+  };
 
   const queries = [imdbId];
   if (title && String(title).trim()) {
@@ -159,7 +163,7 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null) {
   for (let queryIndex = 0; queryIndex < queries.length; queryIndex += 1) {
     const query = queries[queryIndex];
     const mode = queryIndex === 0 ? 'imdb' : (queryIndex === 1 ? 'title' : 'title_year');
-    debugLog('QUICK_SEARCH', `query=${query} mode=${mode} imdb=${imdbId}`);
+    debugLog('QUICK_SEARCH', `query=${query} mode=${mode} imdb=${imdbId} type=${expectedType}`);
 
     try {
       const qsUrl = `/quick-search?q=${encodeURIComponent(query)}&sort=modified_at%3Adesc`;
@@ -204,18 +208,28 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null) {
         verboseLog('QUICK_SEARCH', `sample imdb_ids`, { sampleIds, mode });
       }
 
-      const match = results.find(r => {
+      // Check exact IMDB match that satisfies requested type (movie vs series)
+      let match = results.find(r => {
         if (!r || r._kind === 'term') return false;
         const candidateImdb = normalizeImdb(r.imdb_id || r.imdb);
-        return candidateImdb === requestedImdb;
+        return candidateImdb === requestedImdb && isTypeMatch(r);
       });
+
+      // If still no match and searching by title, match item by title query and expected type
+      if (!match && queryIndex > 0) {
+        match = results.find(r => {
+          if (!r || r._kind === 'term') return false;
+          return isTypeMatch(r);
+        });
+      }
 
       const exactMatch = match
         ? JSON.stringify({
             imdb_id: match.imdb_id || match.imdb,
             url: match.url,
             title: match.title || match.name,
-            kind: match._kind
+            kind: match._kind,
+            type: match.type
           }).slice(0, 300)
         : 'null';
       debugLog('QUICK_SEARCH', `exact_match=${match ? 'found' : 'not_found'} mode=${mode}`, {
@@ -986,7 +1000,7 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   let contentUrl = null;
 
   try {
-    contentUrl = await resolveViaQuickSearch(imdbId, title, year);
+    contentUrl = await resolveViaQuickSearch(imdbId, title, year, type);
   } catch (e) {
     debugLog('STREAM', `resolveViaQuickSearch threw`, { error: e.message });
   }

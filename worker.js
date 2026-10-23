@@ -34,7 +34,7 @@ function withAbsoluteLogo(request) {
 }
 
 function parseStreamRequest(pathname) {
-  const match = pathname.match(/^\/streams\/stream\/(movie|series)\/(.+?)(?:\.json)?\/?$/);
+  const match = pathname.match(/^(?:\/streams)?\/stream\/(movie|series)\/(.+?)(?:\.json)?\/?$/);
   if (!match) return null;
 
   try {
@@ -180,12 +180,12 @@ export default {
       return Response.redirect(`${url.origin}/streams/manifest.json`, 302);
     }
 
-    if (pathname === '/streams/manifest.json') {
+    if (pathname === '/streams/manifest.json' || pathname === '/manifest.json') {
       return json(withAbsoluteLogo(request));
     }
 
-    if (pathname.startsWith('/streams/assets/')) {
-      const assetPath = pathname.replace(/^\/streams\/assets/, '') || '/';
+    if (pathname.startsWith('/streams/assets/') || pathname.startsWith('/assets/')) {
+      const assetPath = pathname.replace(/^\/(?:streams\/)?assets/, '') || '/';
       const assetRequest = new Request(`https://assets.local${assetPath}`, request);
       return env.ASSETS.fetch(assetRequest);
     }
