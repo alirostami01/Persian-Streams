@@ -47,7 +47,7 @@ if command -v cloudflared &> /dev/null; then
   echo "📡 Starting Cloudflare Quick Tunnel (Free & Unlimited Requests)..."
   echo "🔗 A public https://*.trycloudflare.com link will appear below:"
   echo "--------------------------------------------------------"
-  cloudflared tunnel --url "http://localhost:${PORT}"
+  cloudflared tunnel --protocol http2 --url "http://127.0.0.1:${PORT}"
 else
   echo ""
   echo "⚠️ cloudflared is not installed on this system."
