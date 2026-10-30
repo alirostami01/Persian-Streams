@@ -275,6 +275,101 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null, expected
 }
 
 /**
+ * Resiliently fetch page content. Handles servers that abruptly close
+ * HTTP/2 or chunked connections after sending HTML content (aborted / ECONNRESET).
+ */
+async function fetchHtmlContent(url) {
+  // Strategy 1: In Node.js environment, use stream collector to salvage partial HTML on abrupt close
+  if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+    try {
+      const result = await new Promise((resolve, reject) => {
+        client.get(url, {
+          responseType: 'stream',
+          timeout: 20000
+        }).then(response => {
+          let html = '';
+          const stream = response.data;
+          const status = response.status;
+          const contentType = response.headers && response.headers['content-type'];
+          const finalUrl = response.request && response.request.res && response.request.res.responseUrl
+            ? response.request.res.responseUrl
+            : (response.request && response.request.responseURL) || url;
+
+          stream.on('data', chunk => {
+            html += chunk.toString('utf-8');
+          });
+          stream.on('end', () => resolve({ html, status, finalUrl, contentType }));
+          stream.on('error', err => {
+            // When origin prematurely closes after sending the page content
+            if (html && html.length > 1000 && (html.includes('<html') || html.includes('download') || html.includes('series-downloaditems'))) {
+              debugLog('FETCH', `stream closed early by origin (${err.message}), recovered ${html.length} bytes of partial HTML`);
+              resolve({ html, status, finalUrl, contentType });
+            } else {
+              reject(err);
+            }
+          });
+        }).catch(reject);
+      });
+      if (result && result.html) return result;
+    } catch (e) {
+      debugLog('FETCH', `stream fetch failed, trying standard fetch: ${e.message}`);
+    }
+  }
+
+  // Strategy 2: If in Worker environment, try globalThis.fetch with reader
+  if (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function') {
+    try {
+      const resp = await globalThis.fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        }
+      });
+      const status = resp.status;
+      const finalUrl = resp.url || url;
+      const contentType = resp.headers.get('content-type');
+
+      if (resp.body && typeof resp.body.getReader === 'function') {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let html = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            html += decoder.decode(value, { stream: true });
+          }
+        } catch (streamErr) {
+          if (html.length > 1000) {
+            debugLog('FETCH', `worker fetch reader interrupted, recovered ${html.length} bytes`);
+            return { html, status, finalUrl, contentType };
+          }
+          throw streamErr;
+        }
+        return { html, status, finalUrl, contentType };
+      } else {
+        const html = await resp.text();
+        return { html, status, finalUrl, contentType };
+      }
+    } catch (fetchErr) {
+      debugLog('FETCH', `worker fetch failed, falling back to client.get: ${fetchErr.message}`);
+    }
+  }
+
+  // Strategy 3: Standard client.get
+  const response = await client.get(url);
+  return {
+    html: response.data ? String(response.data) : '',
+    status: response.status,
+    finalUrl: response.request && response.request.res && response.request.res.responseUrl
+      ? response.request.res.responseUrl
+      : (response.request && response.request.responseURL) || url,
+    contentType: response.headers && response.headers['content-type']
+  };
+}
+
+/**
  * Fetch and parse a page with detailed diagnostics
  */
 async function fetchPage(url) {
@@ -284,16 +379,9 @@ async function fetchPage(url) {
   }
   debugLog('FETCH', `url=${sanitizeUrlForLog(url)}`);
   try {
-    const response = await client.get(url);
-    const status = response.status;
-    const finalUrl = response.request && response.request.res && response.request.res.responseUrl
-      ? response.request.res.responseUrl
-      : (response.request && response.request.responseURL) || url;
-    const contentType = response.headers && response.headers['content-type'];
-    const body = response.data;
-    const bodyLength = body ? String(body).length : 0;
-    const isHtml = contentType && contentType.includes('text/html');
-    const bodyStr = body ? String(body) : '';
+    const { html, status, finalUrl, contentType } = await fetchHtmlContent(url);
+    const bodyStr = html || '';
+    const bodyLength = bodyStr.length;
 
     debugLog('FETCH', `status=${status}`, { final_url: sanitizeUrlForLog(finalUrl), content_type: contentType, body_length: bodyLength });
 
@@ -310,13 +398,7 @@ async function fetchPage(url) {
       debugLog('FETCH', `cloudflare challenge detected`, { url: sanitizeUrlForLog(url) });
     }
 
-    const containsAkira = bodyStr.toLowerCase().includes('akira');
-    const containsDownloadList = bodyStr.includes('download-list');
-    const containsMkv = bodyStr.toLowerCase().includes('.mkv');
-    const containsAbrtech = bodyStr.toLowerCase().includes('abrtech');
-    debugLog('FETCH', `contains_akira=${containsAkira} contains_download_list=${containsDownloadList} contains_mkv=${containsMkv} contains_abrtech=${containsAbrtech}`);
-
-    if (status !== 200) {
+    if (status && status !== 200) {
       debugLog('FETCH', `non-200 status, returning null`, { status });
       return null;
     }
@@ -1072,7 +1154,7 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   if (validStreams.length > 0) {
     const donationStream = {
       name: '💖 Persian Streams',
-      title: '⚡ جهت ارتقای سرور و رفع محدودیت ۱۰۰ هزارتایی، لطفاً دونیت کنید\n🔗 کلیک کنید: alirostami.com/support',
+      title: '⚡ جهت نگهداری و بهبود پروژه لطفا دونیت کنید\n🔗 کلیک کنید: alirostami.com/support',
       externalUrl: 'https://alirostami.com/support'
     };
     return [donationStream, ...validStreams];
