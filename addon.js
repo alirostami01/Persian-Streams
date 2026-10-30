@@ -279,13 +279,63 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null, expected
  * HTTP/2 or chunked connections after sending HTML content (aborted / ECONNRESET).
  */
 async function fetchHtmlContent(url) {
-  // Strategy 1: In Node.js environment, use stream collector to salvage partial HTML on abrupt close
+  // Strategy 1: Standard globalThis.fetch (native in Node 18+ and Cloudflare Workers)
+  // Highly resilient, handles modern HTTP/2, TLS, and huge chunked responses without prematurely aborting
+  if (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function') {
+    try {
+      const resp = await globalThis.fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        }
+      });
+      const status = resp.status;
+      const finalUrl = resp.url || url;
+      const contentType = resp.headers.get('content-type');
+
+      // Attempt clean text() first
+      try {
+        const html = await resp.text();
+        if (html && html.length > 500) {
+          return { html, status, finalUrl, contentType };
+        }
+      } catch (streamErr) {
+        debugLog('FETCH', `resp.text() threw, falling back to stream reader: ${streamErr.message}`);
+      }
+
+      // If stream interrupted, read chunk by chunk to salvage partial HTML
+      if (resp.body && typeof resp.body.getReader === 'function') {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let html = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            html += decoder.decode(value, { stream: true });
+          }
+        } catch (streamErr) {
+          if (html.length > 1000) {
+            debugLog('FETCH', `fetch reader interrupted, recovered ${html.length} bytes`);
+            return { html, status, finalUrl, contentType };
+          }
+          throw streamErr;
+        }
+        return { html, status, finalUrl, contentType };
+      }
+    } catch (fetchErr) {
+      debugLog('FETCH', `global fetch failed, trying fallback: ${fetchErr.message}`);
+    }
+  }
+
+  // Strategy 2: Node.js axios stream collector fallback
   if (typeof process !== 'undefined' && process.versions && process.versions.node) {
     try {
       const result = await new Promise((resolve, reject) => {
         client.get(url, {
           responseType: 'stream',
-          timeout: 20000
+          timeout: 25000
         }).then(response => {
           let html = '';
           const stream = response.data;
@@ -313,47 +363,6 @@ async function fetchHtmlContent(url) {
       if (result && result.html) return result;
     } catch (e) {
       debugLog('FETCH', `stream fetch failed, trying standard fetch: ${e.message}`);
-    }
-  }
-
-  // Strategy 2: If in Worker environment, try globalThis.fetch with reader
-  if (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function') {
-    try {
-      const resp = await globalThis.fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-        }
-      });
-      const status = resp.status;
-      const finalUrl = resp.url || url;
-      const contentType = resp.headers.get('content-type');
-
-      if (resp.body && typeof resp.body.getReader === 'function') {
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let html = '';
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            html += decoder.decode(value, { stream: true });
-          }
-        } catch (streamErr) {
-          if (html.length > 1000) {
-            debugLog('FETCH', `worker fetch reader interrupted, recovered ${html.length} bytes`);
-            return { html, status, finalUrl, contentType };
-          }
-          throw streamErr;
-        }
-        return { html, status, finalUrl, contentType };
-      } else {
-        const html = await resp.text();
-        return { html, status, finalUrl, contentType };
-      }
-    } catch (fetchErr) {
-      debugLog('FETCH', `worker fetch failed, falling back to client.get: ${fetchErr.message}`);
     }
   }
 
