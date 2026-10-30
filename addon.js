@@ -87,7 +87,7 @@ function getBaseUrl() {
 const LOGO = '/assets/icons/logo.png';
 
 // Initialize addon builder with manifest
-const builder = new addonBuilder({
+const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
@@ -99,7 +99,9 @@ const builder = new addonBuilder({
   contactEmail: 'rostami.ali@gmail.com',
   author: 'Ali Rostami rostami.ali@gmail.com',
   logo: LOGO
-});
+};
+
+const builder = new addonBuilder(manifest);
 
 /**
  * Fetch metadata title from Stremio's meta endpoint using IMDB ID
@@ -1067,11 +1069,20 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     });
   }
 
+  if (validStreams.length > 0) {
+    const donationStream = {
+      name: '💖 Persian Streams',
+      title: '⚡ جهت ارتقای سرور و رفع محدودیت ۱۰۰ هزارتایی، لطفاً دونیت کنید\n🔗 کلیک کنید: alirostami.com/support',
+      externalUrl: 'https://alirostami.com/support'
+    };
+    return [donationStream, ...validStreams];
+  }
+
   return validStreams;
 }
 
 // Define stream handler
-builder.defineStreamHandler((args) => {
+builder.defineStreamHandler(async (args) => {
   const { type, id } = args;
   let imdbId = id;
   let season = null;
@@ -1087,11 +1098,16 @@ builder.defineStreamHandler((args) => {
     debugLog('HANDLER', `Movie request: ${imdbId}`);
   }
 
-  return getStreams(type, imdbId, season, episode);
+  const streams = await getStreams(type, imdbId, season, episode);
+  return { streams: streams || [] };
 });
 
+const addonInterface = builder.getInterface();
+
 module.exports = {
-  manifest: builder.manifest,
+  manifest: addonInterface.manifest || manifest,
+  get: addonInterface.get.bind(addonInterface),
+  getInterface: () => addonInterface,
   getStreams,
   setBaseUrl,
   getBaseUrl,

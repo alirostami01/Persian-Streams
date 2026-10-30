@@ -40,10 +40,18 @@ class AddonBuilder {
 
     return Object.freeze({
       manifest,
-      get: async ({ resource, type, id, extra }) => {
-        const handler = handlers.get(resource);
+      get: async (resource, type, id, extra, config) => {
+        let r = resource, t = type, i = id, e = extra, c = config;
+        if (typeof resource === 'object' && resource !== null) {
+          r = resource.resource;
+          t = resource.type;
+          i = resource.id;
+          e = resource.extra;
+          c = resource.config;
+        }
+        const handler = handlers.get(r);
         if (!handler) return {};
-        return handler({ type, id, extra });
+        return handler({ type: t, id: i, extra: e, config: c });
       },
     });
   }

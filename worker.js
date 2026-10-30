@@ -15,11 +15,16 @@ function debugLog(scope, message, data) {
 }
 
 function json(data, status = 200, extraHeaders = {}) {
+  const cacheHeaders = status === 200
+    ? { 'cache-control': 'public, max-age=14400, s-maxage=86400' }
+    : { 'cache-control': 'no-store' };
+
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'access-control-allow-origin': '*',
+      ...cacheHeaders,
       ...extraHeaders,
     },
   });
@@ -71,7 +76,14 @@ function deduplicateStreams(streams) {
 
   const seen = new Set();
   const unique = streams.filter(stream => {
-    if (!stream || typeof stream.url !== 'string' || !stream.url.startsWith('http')) {
+    if (!stream) return false;
+
+    // Allow externalUrl streams (such as donation items)
+    if (typeof stream.externalUrl === 'string' && stream.externalUrl.startsWith('http')) {
+      return true;
+    }
+
+    if (typeof stream.url !== 'string' || !stream.url.startsWith('http')) {
       return false;
     }
 
