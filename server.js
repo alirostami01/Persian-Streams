@@ -7,7 +7,10 @@ const addonInterface = require('./addon.js');
 const PORT = process.env.PORT || 8000;
 const app = express();
 
-app.get('/manifest.json', (req, res) => {
+const addonRouter = getRouter(addonInterface);
+
+// Handle manifest for both /manifest.json and /streams/manifest.json
+app.get(['/manifest.json', '/streams/manifest.json'], (req, res) => {
   const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
   const host = req.get('host') || `localhost:${PORT}`;
   const manifest = {
@@ -18,8 +21,12 @@ app.get('/manifest.json', (req, res) => {
   res.end(JSON.stringify(manifest));
 });
 
-app.use(getRouter(addonInterface));
-app.use('/assets/icons', express.static(path.join(__dirname, 'assets', 'icons')));
+// Mount router at both root and /streams
+app.use('/streams', addonRouter);
+app.use(addonRouter);
+
+// Serve static assets for both paths
+app.use(['/assets/icons', '/streams/assets/icons'], express.static(path.join(__dirname, 'assets', 'icons')));
 
 app.get('/', (_, res) => {
   res.setHeader('content-type', 'text/html; charset=utf-8');
