@@ -4,7 +4,7 @@ import addonModule from './addon.js';
 // CommonJS module into the Worker, so use a normal static import instead of
 // createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const { manifest, getStreams, setBaseUrl, getBaseUrl } = addonModule;
+const { manifest, get, getStreams, setBaseUrl, getBaseUrl } = addonModule;
 
 function debugLog(scope, message, data) {
   if (data !== undefined) {
@@ -46,6 +46,21 @@ function parseStreamRequest(pathname) {
     return {
       type: match[1],
       id: decodeURIComponent(match[2]),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseCatalogRequest(pathname) {
+  const match = pathname.match(/^(?:\/streams)?\/catalog\/(movie|series)\/([^/]+?)(?:\/([^/]+?))?(?:\.json)?\/?$/);
+  if (!match) return null;
+
+  try {
+    return {
+      type: match[1],
+      id: decodeURIComponent(match[2]),
+      extraPath: match[3] ? decodeURIComponent(match[3]) : null,
     };
   } catch (_) {
     return null;
@@ -205,6 +220,30 @@ export default {
     const streamRequest = parseStreamRequest(pathname);
     if (streamRequest && request.method === 'GET') {
       return handleStream(streamRequest, request.url);
+    }
+
+    const catalogRequest = parseCatalogRequest(pathname);
+    if (catalogRequest && request.method === 'GET') {
+      try {
+        const extra = {};
+        if (catalogRequest.extraPath) {
+          const sp = new URLSearchParams(catalogRequest.extraPath);
+          for (const [k, v] of sp.entries()) {
+            extra[k] = v;
+          }
+        }
+        for (const [k, v] of url.searchParams.entries()) {
+          extra[k] = v;
+        }
+
+        const resp = await get('catalog', catalogRequest.type, catalogRequest.id, extra);
+        return json(resp || { metas: [] }, 200, {
+          'cache-control': 'public, max-age=300, s-maxage=600',
+        });
+      } catch (e) {
+        debugLog('WORKER', `catalog error: ${e.message}`);
+        return json({ metas: [] });
+      }
     }
 
     debugLog('WORKER', `404 not found`, { pathname });

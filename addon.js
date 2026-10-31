@@ -55,6 +55,26 @@ function sanitizeUrlForLog(url) {
   }
 }
 
+// Sandbox/proxied environments: axios does not read proxy env vars on its own.
+function axiosProxyFor(targetUrl) {
+  if (typeof process === 'undefined' || !process.env) return undefined;
+  const raw = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY;
+  if (!raw) return undefined;
+  let targetHost = '';
+  try { targetHost = new URL(targetUrl).hostname; } catch { return undefined; }
+  const noProxy = (process.env.no_proxy || process.env.NO_PROXY || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (noProxy.some((entry) => entry === '*' || targetHost === entry || targetHost.endsWith('.' + entry))) return undefined;
+  try {
+    const u = new URL(raw);
+    if (!u.hostname || !u.port) return undefined;
+    const proxy = { protocol: (u.protocol || 'http:').replace(':', ''), host: u.hostname, port: Number(u.port) };
+    if (u.username) proxy.auth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
+    return proxy;
+  } catch { return undefined; }
+}
+
+const PROXY = axiosProxyFor(BASE_URL);
+
 // Create axios instance with proper headers
 let client = axios.create({
   baseURL: BASE_URL,
@@ -65,14 +85,19 @@ let client = axios.create({
   },
   timeout: 15000,
   maxRedirects: 5,
-  validateStatus: status => status < 500
+  validateStatus: status => status < 500,
+  ...(PROXY ? { proxy: PROXY } : {}),
 });
 
 function setBaseUrl(newBaseUrl) {
   if (newBaseUrl && newBaseUrl !== BASE_URL) {
     BASE_URL = newBaseUrl;
+    const proxy = axiosProxyFor(BASE_URL);
     if (client && client.defaults) {
       client.defaults.baseURL = BASE_URL;
+      if (proxy) {
+        client.defaults.proxy = proxy;
+      }
     }
     debugLog('CONFIG', `BASE_URL updated to ${BASE_URL}`);
   }
@@ -92,10 +117,29 @@ const manifest = {
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
   version: '1.4.0',
-  resources: ['stream'],
+  resources: ['stream', 'catalog'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
-  catalogs: [],
+  catalogs: [
+    {
+      type: 'movie',
+      id: 'persian-streams-movies',
+      name: 'Persian Streams Movies',
+      extra: [
+        { name: 'search' },
+        { name: 'skip' }
+      ]
+    },
+    {
+      type: 'series',
+      id: 'persian-streams-series',
+      name: 'Persian Streams Series',
+      extra: [
+        { name: 'search' },
+        { name: 'skip' }
+      ]
+    }
+  ],
   contactEmail: 'rostami.ali@gmail.com',
   author: 'Ali Rostami rostami.ali@gmail.com',
   logo: LOGO
@@ -1172,6 +1216,181 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   return validStreams;
 }
 
+// ---- Catalog Support --------------------------------------------------------
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"');
+}
+
+function cleanText(str) {
+  return decodeHtmlEntities(String(str || '').replace(/<[^>]*>/g, '')).trim();
+}
+
+function toCatalogMeta(item, expectedType) {
+  if (!item || item._kind === 'term') return null;
+
+  const imdbId = item.imdb_id || item.imdb;
+  if (!imdbId || !String(imdbId).startsWith('tt')) return null;
+
+  const isSeries = item.type === 'series' || String(item.url || '').startsWith('/series/');
+  const itemType = isSeries ? 'series' : 'movie';
+  if (expectedType && expectedType !== itemType) return null;
+
+  const rawTitle = item.title || item.name;
+  const rawTitleFa = item.title_fa || '';
+  const title = cleanText(rawTitle) || cleanText(rawTitleFa);
+  if (!title) return null;
+
+  let poster = undefined;
+  if (item.image) {
+    const rawImage = String(item.image).trim();
+    if (rawImage.startsWith('http://') || rawImage.startsWith('https://')) {
+      poster = rawImage;
+    } else {
+      poster = `${BASE_URL.replace(/\/$/, '')}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`;
+    }
+  }
+
+  const persianTitle = cleanText(rawTitleFa);
+  const rating = item.rating ? String(item.rating) : null;
+  const descParts = [];
+  if (persianTitle) descParts.push(persianTitle);
+
+  const tags = [];
+  if (item.is_dubbled) tags.push('🎙️ دوبله فارسی');
+  if (item.is_hardsub) tags.push('📝 زیرنویس چسبیده');
+  if (rating) tags.push(`⭐ امتیاز: ${rating}/10`);
+  if (item.year) tags.push(`📅 سال: ${item.year}`);
+  if (tags.length > 0) descParts.push(tags.join(' | '));
+
+  return {
+    id: String(imdbId).trim(),
+    type: itemType,
+    name: title,
+    poster,
+    releaseInfo: item.year ? String(item.year) : undefined,
+    description: descParts.length > 0 ? descParts.join('\n\n') : undefined,
+    imdbRating: rating || undefined
+  };
+}
+
+const LATEST_CATALOG_LIMIT = 1000;
+const CATALOG_SEARCH_LIMIT = 100;
+const CATALOG_PAGE_SIZE = 20;
+const CATALOG_CACHE_TTL = 10 * 60 * 1000;
+
+let latestCatalogCache = {
+  movie: [],
+  series: [],
+  timestamp: 0
+};
+
+async function getLatestCatalog(type) {
+  const isCacheValid = (Date.now() - latestCatalogCache.timestamp < CATALOG_CACHE_TTL) &&
+    Array.isArray(latestCatalogCache[type]) &&
+    latestCatalogCache[type].length > 0;
+
+  if (isCacheValid) {
+    return latestCatalogCache[type];
+  }
+
+  try {
+    const response = await client.get(`/quick-search?q=&sort=modified_at%3Adesc&limit=${LATEST_CATALOG_LIMIT}`);
+    let results = response.data;
+    if (!Array.isArray(results)) {
+      results = (results && (results.data || results.results)) || [];
+    }
+    if (!Array.isArray(results)) return latestCatalogCache[type] || [];
+
+    const movieMetas = [];
+    const seriesMetas = [];
+    const seenMovies = new Set();
+    const seenSeries = new Set();
+
+    for (const item of results) {
+      const meta = toCatalogMeta(item);
+      if (!meta) continue;
+
+      if (meta.type === 'movie' && !seenMovies.has(meta.id)) {
+        seenMovies.add(meta.id);
+        movieMetas.push(meta);
+      } else if (meta.type === 'series' && !seenSeries.has(meta.id)) {
+        seenSeries.add(meta.id);
+        seriesMetas.push(meta);
+      }
+    }
+
+    latestCatalogCache = {
+      movie: movieMetas,
+      series: seriesMetas,
+      timestamp: Date.now()
+    };
+
+    return latestCatalogCache[type] || [];
+  } catch (err) {
+    console.error('[CATALOG] Error fetching latest catalog items:', err.message);
+    return latestCatalogCache[type] || [];
+  }
+}
+
+async function searchCatalog(query, type) {
+  try {
+    const response = await client.get(`/quick-search?q=${encodeURIComponent(query)}&limit=${CATALOG_SEARCH_LIMIT}`);
+    let results = response.data;
+    if (!Array.isArray(results)) {
+      results = (results && (results.data || results.results)) || [];
+    }
+    if (!Array.isArray(results)) return [];
+
+    const metas = [];
+    const seen = new Set();
+    for (const item of results) {
+      const meta = toCatalogMeta(item, type);
+      if (!meta || seen.has(meta.id)) continue;
+      seen.add(meta.id);
+      metas.push(meta);
+    }
+    return metas;
+  } catch (err) {
+    console.error(`[CATALOG] Search error for query "${query}":`, err.message);
+    return [];
+  }
+}
+
+builder.defineCatalogHandler(async (args) => {
+  const { type, id, extra } = args;
+  try {
+    const skip = Number((extra && extra.skip) || 0) || 0;
+    const search = extra && extra.search ? String(extra.search).trim() : null;
+
+    let metas = [];
+    if (search) {
+      metas = await searchCatalog(search, type);
+    } else {
+      metas = await getLatestCatalog(type);
+    }
+
+    return {
+      metas: metas.slice(skip, skip + CATALOG_PAGE_SIZE),
+      cacheMaxAge: 600,
+      staleRevalidate: 1200
+    };
+  } catch (err) {
+    console.error('[CATALOG] Error handling catalog request:', err.message);
+    return { metas: [] };
+  }
+});
+
 // Define stream handler
 builder.defineStreamHandler(async (args) => {
   const { type, id } = args;
@@ -1206,5 +1425,10 @@ module.exports = {
   resolveViaQuickSearch,
   fetchPage,
   extractMovieStreams,
-  extractSeriesStreams
+  extractSeriesStreams,
+  toCatalogMeta,
+  getLatestCatalog,
+  searchCatalog,
+  cleanText,
+  decodeHtmlEntities
 };

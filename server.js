@@ -7,6 +7,17 @@ const addonInterface = require('./addon.js');
 const PORT = process.env.PORT || 8000;
 const app = express();
 
+// Enable CORS for all routes (essential for Stremio Web)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 const addonRouter = getRouter(addonInterface);
 
 // Handle manifest for both /manifest.json and /streams/manifest.json
@@ -17,6 +28,7 @@ app.get(['/manifest.json', '/streams/manifest.json'], (req, res) => {
     ...addonInterface.manifest,
     logo: `${protocol}://${host}/assets/icons/logo.png`
   };
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(manifest));
 });
