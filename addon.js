@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.6.0',
+  version: '1.6.1',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -287,14 +287,19 @@ async function getMeta(type, id, proxyBaseUrl = '') {
       });
     }
 
-    // Proxy poster if it comes from tmdb.org (blocked in Iran)
-    if (meta.poster && typeof meta.poster === 'string' && meta.poster.includes('image.tmdb.org')) {
+    // Proxy poster, background, and logo so they reliably load without VPN in Iran
+    if (meta.poster && typeof meta.poster === 'string') {
       meta.poster = proxyImageUrl(meta.poster, effectiveBaseUrl);
     }
 
-    // Proxy background if it comes from tmdb.org (blocked in Iran)
-    if (meta.background && typeof meta.background === 'string' && meta.background.includes('image.tmdb.org')) {
+    // Proxy background so it reliably loads without VPN in Iran
+    if (meta.background && typeof meta.background === 'string') {
       meta.background = proxyImageUrl(meta.background, effectiveBaseUrl);
+    }
+
+    // Proxy logo if present
+    if (meta.logo && typeof meta.logo === 'string') {
+      meta.logo = proxyImageUrl(meta.logo, effectiveBaseUrl);
     }
 
     // Cache the transformed metadata
@@ -612,8 +617,14 @@ async function fetchPage(url) {
       }
     }
 
-    verboseLog('FETCH', `load cheerio`, { body_preview: bodyStr.slice(0, 300).replace(/\n/g, ' ') });
-    return cheerio.load(bodyStr);
+    let cleanedBody = bodyStr;
+    const commentsIndex = cleanedBody.search(/<(?:div|section)\b[^>]*(?:id|class)=["'][^"']*(?:comment|نظر)[^"']*["']/i);
+    if (commentsIndex !== -1 && commentsIndex > 5000) {
+      cleanedBody = cleanedBody.slice(0, commentsIndex) + '</body></html>';
+    }
+
+    verboseLog('FETCH', `load cheerio`, { body_preview: cleanedBody.slice(0, 300).replace(/\n/g, ' ') });
+    return cheerio.load(cleanedBody);
   } catch (error) {
     const status = error.response && error.response.status;
     const finalUrl = error.response && error.response.request && error.response.request.res && error.response.request.res.responseUrl;
@@ -908,11 +919,59 @@ function isDubbed(text) {
     lowerText.includes('persian dub');
 }
 
+const PERSIAN_SEASON_ORDINALS = [
+  { pattern: /بیست\s*و\s*پنجم/i, val: 25 },
+  { pattern: /بیست\s*و\s*چهارم/i, val: 24 },
+  { pattern: /بیست\s*و\s*سوم/i, val: 23 },
+  { pattern: /بیست\s*و\s*دوم/i, val: 22 },
+  { pattern: /بیست\s*و\s*یکم/i, val: 21 },
+  { pattern: /بیستم/i, val: 20 },
+  { pattern: /نوزدهم/i, val: 19 },
+  { pattern: /هجدهم/i, val: 18 },
+  { pattern: /هفدهم/i, val: 17 },
+  { pattern: /شانزدهم/i, val: 16 },
+  { pattern: /پانزدهم/i, val: 15 },
+  { pattern: /چهاردهم/i, val: 14 },
+  { pattern: /سیزدهم/i, val: 13 },
+  { pattern: /دوازدهم/i, val: 12 },
+  { pattern: /یازدهم/i, val: 11 },
+  { pattern: /دهم/i, val: 10 },
+  { pattern: /نهم/i, val: 9 },
+  { pattern: /هشتم/i, val: 8 },
+  { pattern: /هفتم/i, val: 7 },
+  { pattern: /ششم/i, val: 6 },
+  { pattern: /پنجم/i, val: 5 },
+  { pattern: /چهارم/i, val: 4 },
+  { pattern: /سوم/i, val: 3 },
+  { pattern: /دوم/i, val: 2 },
+  { pattern: /اول/i, val: 1 }
+];
+
+function extractSeasonNumber(rawText, fallbackIndex = null) {
+  if (!rawText) return fallbackIndex;
+  const normalized = toEnglishDigits(rawText);
+
+  // Check digit patterns first: "فصل 12", "season 12", "S12"
+  const digitSeasonMatch = normalized.match(/(?:season|فصل|\bS)[\s:]*0*(\d{1,2})\b/i);
+  if (digitSeasonMatch) {
+    return parseInt(digitSeasonMatch[1], 10);
+  }
+
+  // Check Persian ordinals (from longest/highest to shortest to avoid "یازدهم" matching "دهم")
+  for (const { pattern, val } of PERSIAN_SEASON_ORDINALS) {
+    if (pattern.test(normalized)) {
+      return val;
+    }
+  }
+
+  return fallbackIndex;
+}
+
 function extractSeasonNumberFromLegacyLink(text, href) {
   const combined = toEnglishDigits(`${text || ''} ${decodeUrlPart(href || '')}`);
 
-  const seasonMatch = combined.match(/(?:فصل|season|\bS)\s*0*(\d{1,2})\b/i);
-  if (seasonMatch) return parseInt(seasonMatch[1], 10);
+  const fromNumber = extractSeasonNumber(combined);
+  if (fromNumber !== null) return fromNumber;
 
   const folderMatch = combined.match(/\/S0*(\d{1,2})(?:\/|$)/i);
   if (folderMatch) return parseInt(folderMatch[1], 10);
@@ -1056,25 +1115,8 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
     const button = $seasonEl.find('button[data-bs-toggle="collapse"]').first();
     const buttonText = button.text();
 
-    // Determine season number from Persian or English text
-    let seasonNum = seasonIdx + 1;
-
-    const persianNumbers = {
-      'اول': 1, 'دوم': 2, 'سوم': 3, 'چهارم': 4, 'پنجم': 5,
-      'ششم': 6, 'هفتم': 7, 'هشتم': 8, 'نهم': 9, 'دهم': 10
-    };
-
-    for (const [persian, digit] of Object.entries(persianNumbers)) {
-      if (buttonText.includes(persian)) {
-        seasonNum = digit;
-        break;
-      }
-    }
-
-    const digitSeasonMatch = buttonText.match(/(?:season|فصل)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
-    if (digitSeasonMatch) {
-      seasonNum = parseInt(digitSeasonMatch[1], 10);
-    }
+    // Determine season number from Persian ordinals or digits
+    const seasonNum = extractSeasonNumber(buttonText, seasonIdx + 1);
 
     if (parseInt(targetSeason, 10) !== seasonNum) return;
 
@@ -1086,20 +1128,21 @@ async function extractSeriesStreams($, targetSeason, targetEpisode) {
       const $epEl = $(epEl);
       const epLink = $epEl.find('a.btn-block.btn-default').first();
       const epText = epLink.text().trim();
+      const normalizedEpText = toEnglishDigits(epText);
       let epNum = epIdx + 1;
 
-      const persianEpMatch = epText.match(/(?:قسمت)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+      const persianEpMatch = normalizedEpText.match(/(?:قسمت)[\s:]*0*(\d+)/i);
       if (persianEpMatch) {
         epNum = parseInt(persianEpMatch[1], 10);
       } else {
-        const englishEpMatch = epText.match(/(?:episode|ep)[\s\u06F0-\u06F9\u0660-\u0669]*(\d+)/i);
+        const englishEpMatch = normalizedEpText.match(/(?:episode|ep)[\s:]*0*(\d+)/i);
         if (englishEpMatch) {
           epNum = parseInt(englishEpMatch[1], 10);
         } else {
-          const href = epLink.attr('href');
-          if (href) {
-            const hrefEpMatch = href.match(/[?&]episode=(\d+)/i);
-            if (hrefEpMatch) epNum = parseInt(hrefEpMatch[1], 10);
+          const href = epLink.attr('href') || '';
+          const filenameMatch = toEnglishDigits(href).match(/(?:[._-]S\d+E|E|episode=)0*(\d+)/i);
+          if (filenameMatch) {
+            epNum = parseInt(filenameMatch[1], 10);
           }
         }
       }
@@ -1393,7 +1436,7 @@ function toCatalogMeta(item, expectedType) {
   const title = cleanText(rawTitle) || cleanText(rawTitleFa);
   if (!title) return null;
 
-  // Stremio official poster CDN (Metahub) works natively in Iran without VPN.
+  // Stremio poster proxied through our addon to load reliably without VPN in Iran
   let poster = undefined;
   if (imdbId && String(imdbId).startsWith('tt')) {
     poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
@@ -1404,6 +1447,10 @@ function toCatalogMeta(item, expectedType) {
     } else {
       poster = `${BASE_URL.replace(/\/$/, '')}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`;
     }
+  }
+
+  if (poster) {
+    poster = proxyImageUrl(poster);
   }
 
   const persianTitle = cleanText(rawTitleFa);
@@ -1599,6 +1646,7 @@ module.exports = {
   toCatalogMeta,
   getLatestCatalog,
   searchCatalog,
+  extractSeasonNumber,
   cleanText,
   decodeHtmlEntities
 };

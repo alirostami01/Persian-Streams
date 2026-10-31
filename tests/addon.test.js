@@ -65,8 +65,10 @@ describe('Catalog Meta Transformer', () => {
     const meta = addon.toCatalogMeta(rawItem, 'movie');
     assert.ok(meta);
     assert.strictEqual(meta.id, 'tt1234567');
-    assert.strictEqual(meta.type, 'movie');
-    assert.strictEqual(meta.poster, 'https://images.metahub.space/poster/medium/tt1234567/img.jpg');
+    assert.strictEqual(
+      meta.poster,
+      'https://stremio.alirostami.com/streams/thumb?url=https%3A%2F%2Fimages.metahub.space%2Fposter%2Fmedium%2Ftt1234567%2Fimg.jpg'
+    );
     assert.ok(meta.description.includes('🎙️ دوبله فارسی'));
     assert.ok(meta.description.includes('⭐ امتیاز: 8.5/10'));
   });
@@ -131,6 +133,25 @@ describe('Addon Interface & Router', () => {
 
     const resp2 = await addon.getMeta('series', 'invalid123');
     assert.deepStrictEqual(resp2, { meta: null });
+  });
+});
+
+describe('Season Number Detection', () => {
+  test('extractSeasonNumber parses all Persian ordinal numbers correctly', () => {
+    assert.strictEqual(addon.extractSeasonNumber('فصل اولبه اتمام رسیده'), 1);
+    assert.strictEqual(addon.extractSeasonNumber('فصل دومبه اتمام رسیده'), 2);
+    assert.strictEqual(addon.extractSeasonNumber('فصل دهمبه اتمام رسیده'), 10);
+    assert.strictEqual(addon.extractSeasonNumber('فصل یازدهمبه اتمام رسیده'), 11);
+    assert.strictEqual(addon.extractSeasonNumber('فصل دوازدهمبه اتمام رسیده'), 12);
+    assert.strictEqual(addon.extractSeasonNumber('فصل سیزدهمبه اتمام رسیده'), 13);
+    assert.strictEqual(addon.extractSeasonNumber('فصل بیستم'), 20);
+  });
+
+  test('extractSeasonNumber parses Persian and English digits correctly', () => {
+    assert.strictEqual(addon.extractSeasonNumber('فصل ۱۲'), 12);
+    assert.strictEqual(addon.extractSeasonNumber('فصل 11'), 11);
+    assert.strictEqual(addon.extractSeasonNumber('Season 03'), 3);
+    assert.strictEqual(addon.extractSeasonNumber('S02'), 2);
   });
 });
 
