@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/Stremio-Addon-blue?style=flat-square" alt="Stremio Addon" />
   <img src="https://img.shields.io/badge/Node.js-20.18.1%2B-green?style=flat-square" alt="Node.js" />
   <img src="https://img.shields.io/badge/Cloudflare-Workers-orange?style=flat-square" alt="Cloudflare Workers" />
-  <img src="https://img.shields.io/badge/Manifest-v1.5.0-purple?style=flat-square" alt="Manifest Version" />
+  <img src="https://img.shields.io/badge/Manifest-v1.5.1-purple?style=flat-square" alt="Manifest Version" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-yellow?style=flat-square" alt="License" />
 </p>
 

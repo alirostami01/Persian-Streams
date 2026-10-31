@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.5.0',
+  version: '1.5.1',
   resources: ['stream', 'catalog'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -124,7 +124,7 @@ const manifest = {
     {
       type: 'movie',
       id: 'persian-streams-movies',
-      name: 'Persian Streams Movies',
+      name: 'Persian Streams',
       extra: [
         { name: 'search' },
         { name: 'skip' }
@@ -133,7 +133,7 @@ const manifest = {
     {
       type: 'series',
       id: 'persian-streams-series',
-      name: 'Persian Streams Series',
+      name: 'Persian Streams',
       extra: [
         { name: 'search' },
         { name: 'skip' }
@@ -1251,8 +1251,11 @@ function toCatalogMeta(item, expectedType) {
   const title = cleanText(rawTitle) || cleanText(rawTitleFa);
   if (!title) return null;
 
+  // Stremio official poster CDN (Metahub) works natively in Iran without VPN.
   let poster = undefined;
-  if (item.image) {
+  if (imdbId && String(imdbId).startsWith('tt')) {
+    poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
+  } else if (item.image) {
     const rawImage = String(item.image).trim();
     if (rawImage.startsWith('http://') || rawImage.startsWith('https://')) {
       poster = rawImage;
@@ -1305,12 +1308,22 @@ async function getLatestCatalog(type) {
   }
 
   try {
-    const response = await client.get(`/quick-search?q=&sort=modified_at%3Adesc&limit=${LATEST_CATALOG_LIMIT}`);
+    const response = await client.get(`/quick-search?q=&sort=release_date%3Adesc&limit=${LATEST_CATALOG_LIMIT}`);
     let results = response.data;
     if (!Array.isArray(results)) {
       results = (results && (results.data || results.results)) || [];
     }
     if (!Array.isArray(results)) return latestCatalogCache[type] || [];
+
+    // Sort numerically by modified_at desc (newest posts and episode updates appear first)
+    results.sort((a, b) => {
+      const modB = Number(b.modified_at || 0);
+      const modA = Number(a.modified_at || 0);
+      if (modB !== modA) return modB - modA;
+      const relB = Number(b.release_date || 0);
+      const relA = Number(a.release_date || 0);
+      return relB - relA;
+    });
 
     const movieMetas = [];
     const seriesMetas = [];
@@ -1351,6 +1364,9 @@ async function searchCatalog(query, type) {
       results = (results && (results.data || results.results)) || [];
     }
     if (!Array.isArray(results)) return [];
+
+    // Sort search results by modified_at descending so newest updates appear first
+    results.sort((a, b) => (Number(b.modified_at || 0) - Number(a.modified_at || 0)));
 
     const metas = [];
     const seen = new Set();

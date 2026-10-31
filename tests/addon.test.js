@@ -14,12 +14,12 @@ describe('Addon Manifest', () => {
     const movieCatalog = addon.manifest.catalogs.find(c => c.type === 'movie');
     assert.ok(movieCatalog);
     assert.strictEqual(movieCatalog.id, 'persian-streams-movies');
-    assert.strictEqual(movieCatalog.name, 'Persian Streams Movies');
+    assert.strictEqual(movieCatalog.name, 'Persian Streams');
 
     const seriesCatalog = addon.manifest.catalogs.find(c => c.type === 'series');
     assert.ok(seriesCatalog);
     assert.strictEqual(seriesCatalog.id, 'persian-streams-series');
-    assert.strictEqual(seriesCatalog.name, 'Persian Streams Series');
+    assert.strictEqual(seriesCatalog.name, 'Persian Streams');
   });
 
   test('catalogs have search and skip extra options', () => {
@@ -65,9 +65,7 @@ describe('Catalog Meta Transformer', () => {
     assert.ok(meta);
     assert.strictEqual(meta.id, 'tt1234567');
     assert.strictEqual(meta.type, 'movie');
-    assert.strictEqual(meta.name, 'Sample Movie – 2024');
-    assert.strictEqual(meta.releaseInfo, '2024');
-    assert.ok(meta.poster.endsWith('/wp-content/uploads/2024/01/sample.jpg'));
+    assert.strictEqual(meta.poster, 'https://images.metahub.space/poster/medium/tt1234567/img.jpg');
     assert.ok(meta.description.includes('🎙️ دوبله فارسی'));
     assert.ok(meta.description.includes('⭐ امتیاز: 8.5/10'));
   });

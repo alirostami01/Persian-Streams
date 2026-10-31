@@ -40,6 +40,28 @@ app.use(addonRouter);
 // Serve static assets for both paths
 app.use(['/assets/icons', '/streams/assets/icons'], express.static(path.join(__dirname, 'assets', 'icons')));
 
+// Poster proxy for restricted environments
+app.get(['/poster', '/streams/poster'], async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing url parameter');
+  try {
+    const axios = require('axios');
+    const response = await axios.get(targetUrl, {
+      responseType: 'stream',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    response.data.pipe(res);
+  } catch (err) {
+    res.status(502).send('Error proxying image');
+  }
+});
+
 app.get('/', (_, res) => {
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.end(

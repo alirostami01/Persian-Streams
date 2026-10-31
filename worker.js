@@ -217,6 +217,30 @@ export default {
       return env.ASSETS.fetch(assetRequest);
     }
 
+    if (pathname === '/streams/poster' || pathname === '/poster') {
+      const target = url.searchParams.get('url');
+      if (!target) return new Response('Missing url parameter', { status: 400 });
+      try {
+        const resp = await fetch(target, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': getBaseUrl(),
+          },
+        });
+        const contentType = resp.headers.get('content-type') || 'image/jpeg';
+        return new Response(resp.body, {
+          status: resp.status,
+          headers: {
+            'content-type': contentType,
+            'access-control-allow-origin': '*',
+            'cache-control': 'public, max-age=604800, s-maxage=2592000',
+          },
+        });
+      } catch (e) {
+        return new Response('Error loading image', { status: 502 });
+      }
+    }
+
     const streamRequest = parseStreamRequest(pathname);
     if (streamRequest && request.method === 'GET') {
       return handleStream(streamRequest, request.url);
