@@ -250,8 +250,11 @@ export default {
     }
 
     if (pathname === '/streams/poster' || pathname === '/poster' || pathname === '/streams/thumb' || pathname === '/thumb') {
-      const target = url.searchParams.get('url');
+      let target = url.searchParams.get('url');
       if (!target) return new Response('Missing url parameter', { status: 400 });
+
+      // Fix legacy invalid episode thumbnail domain
+      target = target.replace('episodes.images.metahub.space', 'episodes.metahub.space');
 
       // Generate ETag for conditional requests and client caching
       let hash = 0;
@@ -289,7 +292,10 @@ export default {
         const resp = await fetch(target, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Referer': target,
+          },
+          cf: {
+            cacheEverything: true,
+            cacheTtl: 2592000,
           },
         });
 

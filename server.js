@@ -45,11 +45,14 @@ app.use(['/assets/icons', '/streams/assets/icons'], express.static(path.join(__d
 
 // Poster and thumbnail proxy with long-term caching
 const imageMemoryCache = new Map();
-const MAX_IMAGE_CACHE_ENTRIES = 500;
+const MAX_IMAGE_CACHE_ENTRIES = 2000;
 
 app.get(['/poster', '/streams/poster', '/thumb', '/streams/thumb'], async (req, res) => {
-  const targetUrl = req.query.url;
+  let targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send('Missing url parameter');
+
+  // Fix legacy/invalid episode thumbnail domain
+  targetUrl = targetUrl.replace('episodes.images.metahub.space', 'episodes.metahub.space');
 
   let hash = 0;
   for (let i = 0; i < targetUrl.length; i++) {

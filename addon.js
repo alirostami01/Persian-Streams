@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.6.1',
+  version: '1.7.0',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -213,6 +213,59 @@ const metaCache = new Map();
 const META_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 const MAX_META_CACHE_SIZE = 200;
 
+// In-memory cache for official IMDb posters (Amazon CloudFront CDN)
+const imdbPosterCache = new Map();
+const IMDB_POSTER_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_IMDB_POSTER_CACHE_SIZE = 1000;
+
+/**
+ * Fetch official high-res poster from IMDb suggestion API (m.media-amazon.com)
+ */
+async function fetchImdbPoster(imdbId) {
+  if (!imdbId || typeof imdbId !== 'string' || !imdbId.startsWith('tt')) return null;
+
+  const cached = imdbPosterCache.get(imdbId);
+  if (cached && (Date.now() - cached.timestamp < IMDB_POSTER_CACHE_TTL)) {
+    return cached.url;
+  }
+
+  try {
+    const url = `https://v3.sg.media-imdb.com/suggestion/t/${imdbId}.json`;
+    let data = null;
+    if (typeof fetch === 'function') {
+      try {
+        const resp = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        });
+        if (resp.ok) data = await resp.json();
+      } catch (_) {}
+    }
+    if (!data) {
+      const resp = await axios.get(url, {
+        timeout: 4000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
+      data = resp.data;
+    }
+
+    if (data && Array.isArray(data.d)) {
+      const match = data.d.find(item => item.id === imdbId) || data.d[0];
+      if (match && match.i && match.i.imageUrl) {
+        const posterUrl = match.i.imageUrl;
+        if (imdbPosterCache.size >= MAX_IMDB_POSTER_CACHE_SIZE) {
+          const firstKey = imdbPosterCache.keys().next().value;
+          imdbPosterCache.delete(firstKey);
+        }
+        imdbPosterCache.set(imdbId, { timestamp: Date.now(), url: posterUrl });
+        return posterUrl;
+      }
+    }
+  } catch (err) {
+    verboseLog('IMDB_POSTER', `Failed to fetch IMDb poster for ${imdbId}: ${err.message}`);
+  }
+  return null;
+}
+
 /**
  * Fetch and transform metadata (movies & series) from Cinemeta,
  * rewriting episode thumbnails to our proxy for reliable loading in Iran.
@@ -277,15 +330,28 @@ async function getMeta(type, id, proxyBaseUrl = '') {
         const videoCopy = { ...video };
         let thumb = videoCopy.thumbnail;
         if (!thumb && imdbId.startsWith('tt') && videoCopy.season && videoCopy.episode) {
-          // Metahub standard fallback URL for episode thumbnails
-          thumb = `https://episodes.images.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w500.jpg`;
+          // Metahub standard URL for episode thumbnails (redirects to TMDB)
+          thumb = `https://episodes.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w780.jpg`;
         }
         if (thumb) {
+          // Fix legacy invalid domain if present
+          thumb = String(thumb).replace('episodes.images.metahub.space', 'episodes.metahub.space');
           videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl);
+        } else if (meta.background || meta.poster) {
+          // Graceful fallback to background or poster if no thumbnail is available
+          videoCopy.thumbnail = meta.background || meta.poster;
         }
         return videoCopy;
       });
     }
+
+    // Enhance poster with official high-res IMDb poster if available
+    try {
+      const imdbPoster = await fetchImdbPoster(imdbId);
+      if (imdbPoster) {
+        meta.poster = imdbPoster;
+      }
+    } catch (_) {}
 
     // Proxy poster, background, and logo so they reliably load without VPN in Iran
     if (meta.poster && typeof meta.poster === 'string') {
@@ -1311,7 +1377,11 @@ function extractMovieStreams($) {
  */
 async function getStreams(type, imdbId, season = null, episode = null) {
   debugLog('STREAM', `Request type=${type} imdb=${imdbId} season=${season} episode=${episode}`);
-  verboseLog('STREAM', `BASE_URL=${BASE_URL}`);
+  const trailerStream = imdbId && String(imdbId).startsWith('tt') ? {
+    name: '🎬 تریلر رسمی',
+    title: 'مشاهده تریلر رسمی در IMDb\n⭐ Official IMDb Trailer',
+    externalUrl: `https://www.imdb.com/title/${imdbId}/videogallery/`
+  } : null;
 
   // Resolve the metadata title (and year) from Stremio's cinemeta service.
   const meta = await fetchTitleFromMeta(type, imdbId);
@@ -1328,8 +1398,8 @@ async function getStreams(type, imdbId, season = null, episode = null) {
   }
 
   if (!contentUrl) {
-    debugLog('STREAM', `Failed to resolve content URL for ${imdbId}, returning empty streams`);
-    return [];
+    debugLog('STREAM', `Failed to resolve content URL for ${imdbId}`);
+    return trailerStream ? [trailerStream] : [];
   }
 
   debugLog('STREAM', `contentUrl resolved: ${sanitizeUrlForLog(contentUrl)}`);
@@ -1339,12 +1409,12 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     $ = await fetchPage(contentUrl);
   } catch (e) {
     debugLog('STREAM', `fetchPage threw`, { error: e.message });
-    return [];
+    return trailerStream ? [trailerStream] : [];
   }
 
   if (!$) {
-    debugLog('STREAM', `Failed to fetch content page: ${sanitizeUrlForLog(contentUrl)}, returning empty streams`);
-    return [];
+    debugLog('STREAM', `Failed to fetch content page: ${sanitizeUrlForLog(contentUrl)}`);
+    return trailerStream ? [trailerStream] : [];
   }
 
   let streams = [];
@@ -1359,7 +1429,7 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     }
   } catch (e) {
     debugLog('STREAM', `parser threw`, { error: e.message, stack: e.stack && e.stack.slice(0, 800) });
-    return [];
+    return trailerStream ? [trailerStream] : [];
   }
 
   debugLog('STREAM', `Found ${streams.length} stream(s) for ${imdbId}`);
@@ -1395,7 +1465,13 @@ async function getStreams(type, imdbId, season = null, episode = null) {
       title: '⚡ جهت نگهداری و بهبود پروژه لطفا دونیت کنید\n🔗 کلیک کنید: alirostami.com/support',
       externalUrl: 'https://alirostami.com/support'
     };
-    return [donationStream, ...validStreams];
+    return trailerStream
+      ? [donationStream, trailerStream, ...validStreams]
+      : [donationStream, ...validStreams];
+  }
+
+  if (trailerStream) {
+    return [trailerStream];
   }
 
   return validStreams;
@@ -1439,7 +1515,12 @@ function toCatalogMeta(item, expectedType) {
   // Stremio poster proxied through our addon to load reliably without VPN in Iran
   let poster = undefined;
   if (imdbId && String(imdbId).startsWith('tt')) {
-    poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
+    const cachedImdb = imdbPosterCache.get(imdbId);
+    if (cachedImdb && cachedImdb.url) {
+      poster = cachedImdb.url;
+    } else {
+      poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
+    }
   } else if (item.image) {
     const rawImage = String(item.image).trim();
     if (rawImage.startsWith('http://') || rawImage.startsWith('https://')) {
@@ -1648,5 +1729,6 @@ module.exports = {
   searchCatalog,
   extractSeasonNumber,
   cleanText,
-  decodeHtmlEntities
+  decodeHtmlEntities,
+  fetchImdbPoster
 };
