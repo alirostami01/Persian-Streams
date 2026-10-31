@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.7.0',
+  version: '1.7.1',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -1377,7 +1377,9 @@ function extractMovieStreams($) {
  */
 async function getStreams(type, imdbId, season = null, episode = null) {
   debugLog('STREAM', `Request type=${type} imdb=${imdbId} season=${season} episode=${episode}`);
-  const trailerStream = imdbId && String(imdbId).startsWith('tt') ? {
+  // Temporarily disabled trailer stream
+  const ENABLE_TRAILER_STREAM = false;
+  const trailerStream = (ENABLE_TRAILER_STREAM && imdbId && String(imdbId).startsWith('tt')) ? {
     name: '🎬 تریلر رسمی',
     title: 'مشاهده تریلر رسمی در IMDb\n⭐ Official IMDb Trailer',
     externalUrl: `https://www.imdb.com/title/${imdbId}/videogallery/`

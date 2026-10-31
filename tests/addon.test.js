@@ -162,13 +162,20 @@ describe('IMDb Features', () => {
     assert.strictEqual(await addon.fetchImdbPoster('12345'), null);
   });
 
-  test('getStreams provides IMDb trailer stream with videogallery URL', async () => {
+  test.skip('getStreams provides IMDb trailer stream with videogallery URL (temporarily disabled)', async () => {
     // When no streams are resolved from quick search, it should still return the trailer stream
     const streams = await addon.getStreams('movie', 'tt0111161');
     assert.ok(Array.isArray(streams));
     const trailer = streams.find(s => s.name && s.name.includes('تریلر رسمی'));
     assert.ok(trailer, 'Trailer stream should be present');
     assert.strictEqual(trailer.externalUrl, 'https://www.imdb.com/title/tt0111161/videogallery/');
+  });
+
+  test('trailer stream is disabled', async () => {
+    const streams = await addon.getStreams('movie', 'tt0111161');
+    assert.ok(Array.isArray(streams));
+    const trailer = streams.find(s => s.name && s.name.includes('تریلر رسمی'));
+    assert.strictEqual(trailer, undefined, 'Trailer stream should not be present');
   });
 });
 
