@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/Stremio-Addon-blue?style=flat-square" alt="Stremio Addon" />
   <img src="https://img.shields.io/badge/Node.js-20.18.1%2B-green?style=flat-square" alt="Node.js" />
   <img src="https://img.shields.io/badge/Cloudflare-Workers-orange?style=flat-square" alt="Cloudflare Workers" />
-  <img src="https://img.shields.io/badge/Manifest-v1.5.1-purple?style=flat-square" alt="Manifest Version" />
+  <img src="https://img.shields.io/badge/Manifest-v1.6.0-purple?style=flat-square" alt="Manifest Version" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-yellow?style=flat-square" alt="License" />
 </p>
 
@@ -100,6 +100,7 @@ stremio://stremio.alirostami.com/streams/manifest.json
 - 🔍 **جستجوی هوشمند در کاتالوگ**: امکان جستجوی عناوین فارسی و انگلیسی در بخش کاتالوگ با صفحه‌بندی روان و سریع (بیش از ۵۰۰ عنوان در هر بخش با کش هوشمند)
 - 🌐 **سازگاری کامل با Stremio Web**: تنظیم کامل هدرهای CORS روی تمام روت‌ها برای اجرای بدون خطای نسخه تحت وب (`web.strem.io`)
 - 🛡️ **پشتیبانی از پروکسی Axios**: شناسایی و اعمال خودکار تنظیمات پروکسی محیطی (`https_proxy` و ...) در سرور Node
+- 🖼️ **نمایش بدون فیلتر تصاویر قسمت‌ها و کش هوشمند در Stremio**: ارائه‌دهنده resource متادیتا (`meta`) برای سریال‌ها همراه با پروکسی پرسرعت تصاویر اپیزودها (`/thumb`) و هدرهای کش دائمی (`max-age=31536000, immutable`) تا تصاویر اپیزودها در اینترنت ایران به درستی باز شده و در حافظه داخلی دیسک دستگاه کاربر کش شوند و هرگز دوباره لود نشوند.
 - 📦 **دو runtime**: اجرای Node.js/Express (`server.js`) و Cloudflare Workers (`worker.js`) با هسته مشترک `addon.js`
 - ⚡ **بیلدر سبک** (`stremio-builder.js`) جایگزین SDK رسمی برای جلوگیری از باندل Express در Workers
 

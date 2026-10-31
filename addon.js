@@ -116,8 +116,8 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.5.1',
-  resources: ['stream', 'catalog'],
+  version: '1.6.0',
+  resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
   catalogs: [
@@ -173,6 +173,148 @@ async function fetchTitleFromMeta(type, imdbId) {
     return null;
   }
 }
+
+let PUBLIC_URL = (typeof process !== 'undefined' && process.env && process.env.PUBLIC_URL) ||
+  (typeof process !== 'undefined' && process.env && process.env.PORT ? `http://localhost:${process.env.PORT}` : 'https://stremio.alirostami.com');
+
+function setPublicUrl(url) {
+  if (url) {
+    PUBLIC_URL = String(url).replace(/\/$/, '');
+  }
+}
+
+function getPublicUrl() {
+  return PUBLIC_URL;
+}
+
+/**
+ * Proxies an image URL through our addon endpoint with aggressive caching headers.
+ */
+function proxyImageUrl(rawUrl, proxyBaseUrl = '') {
+  if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+  const trimmed = rawUrl.trim();
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) return trimmed;
+  // If already proxied, avoid double proxying
+  if (
+    trimmed.includes('/streams/thumb') ||
+    trimmed.includes('/streams/poster') ||
+    trimmed.includes('/thumb?') ||
+    trimmed.includes('/poster?')
+  ) {
+    return trimmed;
+  }
+  const base = (proxyBaseUrl || PUBLIC_URL || 'https://stremio.alirostami.com').replace(/\/$/, '');
+  const prefix = base.endsWith('/streams') ? base : `${base}/streams`;
+  return `${prefix}/thumb?url=${encodeURIComponent(trimmed)}`;
+}
+
+// In-memory cache for metadata responses to avoid repeated network roundtrips
+const metaCache = new Map();
+const META_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+const MAX_META_CACHE_SIZE = 200;
+
+/**
+ * Fetch and transform metadata (movies & series) from Cinemeta,
+ * rewriting episode thumbnails to our proxy for reliable loading in Iran.
+ */
+async function getMeta(type, id, proxyBaseUrl = '') {
+  if (!id || typeof id !== 'string') return { meta: null };
+  const imdbId = id.split(':')[0];
+  if (!imdbId.startsWith('tt')) return { meta: null };
+
+  const effectiveBaseUrl = (proxyBaseUrl || PUBLIC_URL || 'https://stremio.alirostami.com').replace(/\/$/, '');
+  const cacheKey = `${type}:${imdbId}:${effectiveBaseUrl}`;
+  const now = Date.now();
+
+  const cached = metaCache.get(cacheKey);
+  if (cached && (now - cached.timestamp < META_CACHE_TTL)) {
+    return {
+      meta: cached.meta,
+      cacheMaxAge: 86400,
+      staleRevalidate: 86400 * 7
+    };
+  }
+
+  const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
+  let cinemetaData = null;
+
+  try {
+    if (typeof fetch === 'function') {
+      try {
+        const resp = await fetch(metaUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+          }
+        });
+        if (resp.ok) {
+          cinemetaData = await resp.json();
+        }
+      } catch (err) {
+        verboseLog('META', `fetch error for ${imdbId}: ${err.message}`);
+      }
+    }
+
+    if (!cinemetaData) {
+      const response = await axios.get(metaUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        },
+        timeout: 8000
+      });
+      cinemetaData = response.data;
+    }
+
+    if (!cinemetaData || !cinemetaData.meta) {
+      return { meta: null };
+    }
+
+    const meta = { ...cinemetaData.meta };
+
+    // Rewrite episode thumbnails to proxy through our addon so they load and cache in Iran
+    if (Array.isArray(meta.videos)) {
+      meta.videos = meta.videos.map(video => {
+        if (!video) return video;
+        const videoCopy = { ...video };
+        let thumb = videoCopy.thumbnail;
+        if (!thumb && imdbId.startsWith('tt') && videoCopy.season && videoCopy.episode) {
+          // Metahub standard fallback URL for episode thumbnails
+          thumb = `https://episodes.images.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w500.jpg`;
+        }
+        if (thumb) {
+          videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl);
+        }
+        return videoCopy;
+      });
+    }
+
+    // Proxy poster if it comes from tmdb.org (blocked in Iran)
+    if (meta.poster && typeof meta.poster === 'string' && meta.poster.includes('image.tmdb.org')) {
+      meta.poster = proxyImageUrl(meta.poster, effectiveBaseUrl);
+    }
+
+    // Proxy background if it comes from tmdb.org (blocked in Iran)
+    if (meta.background && typeof meta.background === 'string' && meta.background.includes('image.tmdb.org')) {
+      meta.background = proxyImageUrl(meta.background, effectiveBaseUrl);
+    }
+
+    // Cache the transformed metadata
+    if (metaCache.size >= MAX_META_CACHE_SIZE) {
+      const oldestKey = metaCache.keys().next().value;
+      metaCache.delete(oldestKey);
+    }
+    metaCache.set(cacheKey, { timestamp: now, meta });
+
+    return {
+      meta,
+      cacheMaxAge: 86400,
+      staleRevalidate: 86400 * 7
+    };
+  } catch (error) {
+    debugLog('META', `Failed to fetch meta for ${id}: ${error.message}`);
+    return { meta: null };
+  }
+}
+
 
 /**
  * Resolve the real content URL via the site's quick-search endpoint.
@@ -1407,6 +1549,14 @@ builder.defineCatalogHandler(async (args) => {
   }
 });
 
+// Define meta handler
+builder.defineMetaHandler(async (args) => {
+  const { type, id, config } = args;
+  debugLog('HANDLER', `Meta request: type=${type}, id=${id}`);
+  const origin = (config && config.origin) || PUBLIC_URL;
+  return getMeta(type, id, origin);
+});
+
 // Define stream handler
 builder.defineStreamHandler(async (args) => {
   const { type, id } = args;
@@ -1435,6 +1585,10 @@ module.exports = {
   get: addonInterface.get.bind(addonInterface),
   getInterface: () => addonInterface,
   getStreams,
+  getMeta,
+  proxyImageUrl,
+  setPublicUrl,
+  getPublicUrl,
   setBaseUrl,
   getBaseUrl,
   fetchTitleFromMeta,

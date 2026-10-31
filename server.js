@@ -24,6 +24,9 @@ const addonRouter = getRouter(addonInterface);
 app.get(['/manifest.json', '/streams/manifest.json'], (req, res) => {
   const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
   const host = req.get('host') || `localhost:${PORT}`;
+  if (typeof addonInterface.setPublicUrl === 'function') {
+    addonInterface.setPublicUrl(`${protocol}://${host}`);
+  }
   const manifest = {
     ...addonInterface.manifest,
     logo: `${protocol}://${host}/assets/icons/logo.png`
@@ -40,23 +43,63 @@ app.use(addonRouter);
 // Serve static assets for both paths
 app.use(['/assets/icons', '/streams/assets/icons'], express.static(path.join(__dirname, 'assets', 'icons')));
 
-// Poster proxy for restricted environments
-app.get(['/poster', '/streams/poster'], async (req, res) => {
+// Poster and thumbnail proxy with long-term caching
+const imageMemoryCache = new Map();
+const MAX_IMAGE_CACHE_ENTRIES = 500;
+
+app.get(['/poster', '/streams/poster', '/thumb', '/streams/thumb'], async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send('Missing url parameter');
+
+  let hash = 0;
+  for (let i = 0; i < targetUrl.length; i++) {
+    hash = ((hash << 5) - hash) + targetUrl.charCodeAt(i);
+    hash |= 0;
+  }
+  const etag = `W/"thumb-${Math.abs(hash)}"`;
+
+  if (req.headers['if-none-match'] === etag) {
+    res.setHeader('ETag', etag);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.status(304).end();
+  }
+
+  if (imageMemoryCache.has(targetUrl)) {
+    const cached = imageMemoryCache.get(targetUrl);
+    res.setHeader('Content-Type', cached.contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('ETag', etag);
+    return res.send(cached.data);
+  }
+
   try {
     const axios = require('axios');
     const response = await axios.get(targetUrl, {
-      responseType: 'stream',
+      responseType: 'arraybuffer',
       timeout: 10000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
-    res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
+
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    const buffer = Buffer.from(response.data);
+
+    if (buffer.length <= 1024 * 1024) {
+      if (imageMemoryCache.size >= MAX_IMAGE_CACHE_ENTRIES) {
+        const firstKey = imageMemoryCache.keys().next().value;
+        imageMemoryCache.delete(firstKey);
+      }
+      imageMemoryCache.set(targetUrl, { contentType, data: buffer });
+    }
+
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'public, max-age=604800');
-    response.data.pipe(res);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('ETag', etag);
+    res.send(buffer);
   } catch (err) {
     res.status(502).send('Error proxying image');
   }

@@ -4,7 +4,7 @@ import addonModule from './addon.js';
 // CommonJS module into the Worker, so use a normal static import instead of
 // createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const { manifest, get, getStreams, setBaseUrl, getBaseUrl } = addonModule;
+const { manifest, get, getStreams, getMeta, setBaseUrl, getBaseUrl, setPublicUrl } = addonModule;
 
 function debugLog(scope, message, data) {
   if (data !== undefined) {
@@ -61,6 +61,20 @@ function parseCatalogRequest(pathname) {
       type: match[1],
       id: decodeURIComponent(match[2]),
       extraPath: match[3] ? decodeURIComponent(match[3]) : null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseMetaRequest(pathname) {
+  const match = pathname.match(/^(?:\/streams)?\/meta\/(movie|series)\/([^/]+?)(?:\.json)?\/?$/);
+  if (!match) return null;
+
+  try {
+    return {
+      type: match[1],
+      id: decodeURIComponent(match[2]),
     };
   } catch (_) {
     return null;
@@ -160,8 +174,22 @@ async function handleStream(streamRequest, requestUrl) {
   }
 }
 
+async function handleMeta(metaRequest, origin) {
+  const { type, id } = metaRequest;
+  try {
+    debugLog('WORKER', `meta request type=${type} id=${id} origin=${origin}`);
+    const metaResp = await getMeta(type, id, origin);
+    return json(metaResp || { meta: null }, 200, {
+      'cache-control': 'public, max-age=86400, s-maxage=86400',
+    });
+  } catch (error) {
+    console.error('[WORKER] meta handler error:', error.message);
+    return json({ meta: null }, 200);
+  }
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Inject BASE_URL from Worker env into addon module (handles both f2my.top and www.f2my.top)
     try {
       const envBase = env && (env.BASE_URL || env.base_url);
@@ -193,6 +221,10 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
+    if (typeof setPublicUrl === 'function') {
+      setPublicUrl(url.origin);
+    }
+
     debugLog('WORKER', `incoming ${request.method} ${pathname}`);
 
     if (pathname === '/') {
@@ -217,28 +249,85 @@ export default {
       return env.ASSETS.fetch(assetRequest);
     }
 
-    if (pathname === '/streams/poster' || pathname === '/poster') {
+    if (pathname === '/streams/poster' || pathname === '/poster' || pathname === '/streams/thumb' || pathname === '/thumb') {
       const target = url.searchParams.get('url');
       if (!target) return new Response('Missing url parameter', { status: 400 });
+
+      // Generate ETag for conditional requests and client caching
+      let hash = 0;
+      for (let i = 0; i < target.length; i++) {
+        hash = ((hash << 5) - hash) + target.charCodeAt(i);
+        hash |= 0;
+      }
+      const etag = `W/"thumb-${Math.abs(hash)}"`;
+
+      // Check conditional request (If-None-Match)
+      const ifNoneMatch = request.headers.get('if-none-match');
+      if (ifNoneMatch && ifNoneMatch === etag) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            'etag': etag,
+            'access-control-allow-origin': '*',
+            'cache-control': 'public, max-age=31536000, immutable',
+          },
+        });
+      }
+
+      // Check Cloudflare Edge Cache
+      const cache = typeof caches !== 'undefined' && caches.default;
+      if (cache && request.method === 'GET') {
+        try {
+          const cached = await cache.match(request);
+          if (cached) {
+            return cached;
+          }
+        } catch (_) {}
+      }
+
       try {
         const resp = await fetch(target, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': getBaseUrl(),
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Referer': target,
           },
         });
+
+        if (!resp.ok) {
+          return new Response('Error loading image', { status: resp.status });
+        }
+
         const contentType = resp.headers.get('content-type') || 'image/jpeg';
-        return new Response(resp.body, {
-          status: resp.status,
+        const imageResponse = new Response(resp.body, {
+          status: 200,
           headers: {
             'content-type': contentType,
             'access-control-allow-origin': '*',
-            'cache-control': 'public, max-age=604800, s-maxage=2592000',
+            'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+            'cache-control': 'public, max-age=31536000, immutable',
+            'etag': etag,
           },
         });
+
+        if (cache) {
+          try {
+            if (ctx && typeof ctx.waitUntil === 'function') {
+              ctx.waitUntil(cache.put(request, imageResponse.clone()));
+            } else {
+              await cache.put(request, imageResponse.clone());
+            }
+          } catch (_) {}
+        }
+
+        return imageResponse;
       } catch (e) {
         return new Response('Error loading image', { status: 502 });
       }
+    }
+
+    const metaRequest = parseMetaRequest(pathname);
+    if (metaRequest && request.method === 'GET') {
+      return handleMeta(metaRequest, url.origin);
     }
 
     const streamRequest = parseStreamRequest(pathname);
