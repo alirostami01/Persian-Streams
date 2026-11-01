@@ -21,7 +21,7 @@ if (!BASE_URL && typeof globalThis !== 'undefined' && globalThis.BASE_URL) {
 }
 if (!BASE_URL) {
   // Fallback to the production default used in wrangler.jsonc
-  BASE_URL = 'https://film2med.top';
+  BASE_URL = 'https://www.f2mc.top';
   console.warn(`[CONFIG] BASE_URL not set, falling back to ${BASE_URL}`);
 }
 
@@ -434,7 +434,8 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null, expected
       debugLog('QUICK_SEARCH', `status=${status} mode=${mode}`, { contentType });
 
       if (status !== 200) {
-        debugLog('QUICK_SEARCH', `non-200 status`, { status, query, mode });
+        const bodyPreview = typeof response.data === 'string' ? response.data.slice(0, 300) : JSON.stringify(response.data);
+        debugLog('QUICK_SEARCH', `non-200 status`, { status, query, mode, body: bodyPreview });
         continue;
       }
 

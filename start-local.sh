@@ -9,7 +9,7 @@
 set -e
 
 PORT=${PORT:-8000}
-BASE_URL=${BASE_URL:-"https://film2med.top"}
+BASE_URL=${BASE_URL:-"https://www.f2mc.top"}
 
 echo "--------------------------------------------------------"
 echo "🚀 Starting Persian Streams Local Server on port ${PORT}..."
