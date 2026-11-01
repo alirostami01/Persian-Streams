@@ -190,7 +190,7 @@ async function handleMeta(metaRequest, origin) {
 
 export default {
   async fetch(request, env, ctx) {
-    // Inject BASE_URL from Worker env into addon module (handles both f2my.top and www.f2my.top)
+    // Inject BASE_URL from Worker env into addon module (e.g. film2med.top)
     try {
       const envBase = env && (env.BASE_URL || env.base_url);
       if (envBase) {
