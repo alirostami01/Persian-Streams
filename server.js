@@ -47,12 +47,29 @@ app.use(['/assets/icons', '/streams/assets/icons'], express.static(path.join(__d
 const imageMemoryCache = new Map();
 const MAX_IMAGE_CACHE_ENTRIES = 2000;
 
+const SVG_THUMBNAIL_PLACEHOLDER = `<svg xmlns="http://www.w3.org/2000/svg" width="780" height="439" viewBox="0 0 780 439" fill="none">
+  <rect width="780" height="439" fill="#1b1c24"/>
+  <rect width="780" height="439" fill="url(#grad)" opacity="0.45"/>
+  <defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="780" y2="439" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4e3a9c"/>
+      <stop offset="1" stop-color="#0e0e14"/>
+    </linearGradient>
+  </defs>
+  <circle cx="390" cy="219" r="42" fill="#262734" opacity="0.85"/>
+  <path d="M382 201L404 219L382 237V201Z" fill="#a0a0b6"/>
+</svg>`;
+
 app.get(['/poster', '/streams/poster', '/thumb', '/streams/thumb'], async (req, res) => {
   let targetUrl = req.query.url;
+  let fallbackUrl = req.query.fallback;
   if (!targetUrl) return res.status(400).send('Missing url parameter');
 
   // Fix legacy/invalid episode thumbnail domain
   targetUrl = targetUrl.replace('episodes.images.metahub.space', 'episodes.metahub.space');
+  if (fallbackUrl) {
+    fallbackUrl = fallbackUrl.replace('episodes.images.metahub.space', 'episodes.metahub.space');
+  }
 
   let hash = 0;
   for (let i = 0; i < targetUrl.length; i++) {
@@ -77,16 +94,29 @@ app.get(['/poster', '/streams/poster', '/thumb', '/streams/thumb'], async (req, 
     return res.send(cached.data);
   }
 
-  try {
-    const axios = require('axios');
-    const response = await axios.get(targetUrl, {
+  const axios = require('axios');
+  const fetchUrl = async (url) => {
+    return await axios.get(url, {
       responseType: 'arraybuffer',
       timeout: 10000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
       }
     });
+  };
 
+  let response = null;
+  try {
+    response = await fetchUrl(targetUrl);
+  } catch (err) {
+    if (fallbackUrl) {
+      try {
+        response = await fetchUrl(fallbackUrl);
+      } catch (_) {}
+    }
+  }
+
+  if (response && response.status >= 200 && response.status < 300) {
     const contentType = response.headers['content-type'] || 'image/jpeg';
     const buffer = Buffer.from(response.data);
 
@@ -102,10 +132,14 @@ app.get(['/poster', '/streams/poster', '/thumb', '/streams/thumb'], async (req, 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     res.setHeader('ETag', etag);
-    res.send(buffer);
-  } catch (err) {
-    res.status(502).send('Error proxying image');
+    return res.send(buffer);
   }
+
+  // Graceful fallback to clean SVG placeholder so Stremio client never shows broken image
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(SVG_THUMBNAIL_PLACEHOLDER);
 });
 
 app.get('/', (_, res) => {

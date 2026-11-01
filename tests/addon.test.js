@@ -122,6 +122,17 @@ describe('Addon Interface & Router', () => {
     const doubleProxied = addon.proxyImageUrl(proxied, 'https://stremio.alirostami.com');
     assert.strictEqual(doubleProxied, proxied);
 
+    // Fallback URL parameter support
+    const withFallback = addon.proxyImageUrl(
+      'https://episodes.metahub.space/tt1355644/1/1/w780.jpg',
+      'https://stremio.alirostami.com',
+      'https://images.metahub.space/background/medium/tt1355644/img.jpg'
+    );
+    assert.strictEqual(
+      withFallback,
+      'https://stremio.alirostami.com/streams/thumb?url=https%3A%2F%2Fepisodes.metahub.space%2Ftt1355644%2F1%2F1%2Fw780.jpg&fallback=https%3A%2F%2Fimages.metahub.space%2Fbackground%2Fmedium%2Ftt1355644%2Fimg.jpg'
+    );
+
     // Non-URL pass-through
     assert.strictEqual(addon.proxyImageUrl(''), '');
     assert.strictEqual(addon.proxyImageUrl(null), null);

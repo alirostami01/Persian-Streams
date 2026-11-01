@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.7.1',
+  version: '1.7.5',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -190,7 +190,7 @@ function getPublicUrl() {
 /**
  * Proxies an image URL through our addon endpoint with aggressive caching headers.
  */
-function proxyImageUrl(rawUrl, proxyBaseUrl = '') {
+function proxyImageUrl(rawUrl, proxyBaseUrl = '', fallbackUrl = '') {
   if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
   const trimmed = rawUrl.trim();
   if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) return trimmed;
@@ -205,7 +205,19 @@ function proxyImageUrl(rawUrl, proxyBaseUrl = '') {
   }
   const base = (proxyBaseUrl || PUBLIC_URL || 'https://stremio.alirostami.com').replace(/\/$/, '');
   const prefix = base.endsWith('/streams') ? base : `${base}/streams`;
-  return `${prefix}/thumb?url=${encodeURIComponent(trimmed)}`;
+  let proxied = `${prefix}/thumb?url=${encodeURIComponent(trimmed)}`;
+  if (fallbackUrl && typeof fallbackUrl === 'string' && fallbackUrl.trim().startsWith('http')) {
+    const cleanFallback = fallbackUrl.trim();
+    if (
+      !cleanFallback.includes('/streams/thumb') &&
+      !cleanFallback.includes('/streams/poster') &&
+      !cleanFallback.includes('/thumb?') &&
+      !cleanFallback.includes('/poster?')
+    ) {
+      proxied += `&fallback=${encodeURIComponent(cleanFallback)}`;
+    }
+  }
+  return proxied;
 }
 
 // In-memory cache for metadata responses to avoid repeated network roundtrips
@@ -323,6 +335,16 @@ async function getMeta(type, id, proxyBaseUrl = '') {
 
     const meta = { ...cinemetaData.meta };
 
+    // Enhance poster with official high-res IMDb poster if available
+    try {
+      const imdbPoster = await fetchImdbPoster(imdbId);
+      if (imdbPoster) {
+        meta.poster = imdbPoster;
+      }
+    } catch (_) {}
+
+    const fallbackImage = meta.background || meta.poster || '';
+
     // Rewrite episode thumbnails to proxy through our addon so they load and cache in Iran
     if (Array.isArray(meta.videos)) {
       meta.videos = meta.videos.map(video => {
@@ -336,22 +358,14 @@ async function getMeta(type, id, proxyBaseUrl = '') {
         if (thumb) {
           // Fix legacy invalid domain if present
           thumb = String(thumb).replace('episodes.images.metahub.space', 'episodes.metahub.space');
-          videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl);
-        } else if (meta.background || meta.poster) {
+          videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl, fallbackImage);
+        } else if (fallbackImage) {
           // Graceful fallback to background or poster if no thumbnail is available
-          videoCopy.thumbnail = meta.background || meta.poster;
+          videoCopy.thumbnail = proxyImageUrl(fallbackImage, effectiveBaseUrl);
         }
         return videoCopy;
       });
     }
-
-    // Enhance poster with official high-res IMDb poster if available
-    try {
-      const imdbPoster = await fetchImdbPoster(imdbId);
-      if (imdbPoster) {
-        meta.poster = imdbPoster;
-      }
-    } catch (_) {}
 
     // Proxy poster, background, and logo so they reliably load without VPN in Iran
     if (meta.poster && typeof meta.poster === 'string') {

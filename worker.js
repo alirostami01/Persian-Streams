@@ -30,6 +30,19 @@ function json(data, status = 200, extraHeaders = {}) {
   });
 }
 
+const SVG_THUMBNAIL_PLACEHOLDER = `<svg xmlns="http://www.w3.org/2000/svg" width="780" height="439" viewBox="0 0 780 439" fill="none">
+  <rect width="780" height="439" fill="#1b1c24"/>
+  <rect width="780" height="439" fill="url(#grad)" opacity="0.45"/>
+  <defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="780" y2="439" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4e3a9c"/>
+      <stop offset="1" stop-color="#0e0e14"/>
+    </linearGradient>
+  </defs>
+  <circle cx="390" cy="219" r="42" fill="#262734" opacity="0.85"/>
+  <path d="M382 201L404 219L382 237V201Z" fill="#a0a0b6"/>
+</svg>`;
+
 function withAbsoluteLogo(request) {
   const url = new URL(request.url);
   return {
@@ -253,8 +266,13 @@ export default {
       let target = url.searchParams.get('url');
       if (!target) return new Response('Missing url parameter', { status: 400 });
 
+      let fallback = url.searchParams.get('fallback');
+
       // Fix legacy invalid episode thumbnail domain
       target = target.replace('episodes.images.metahub.space', 'episodes.metahub.space');
+      if (fallback) {
+        fallback = fallback.replace('episodes.images.metahub.space', 'episodes.metahub.space');
+      }
 
       // Generate ETag for conditional requests and client caching
       let hash = 0;
@@ -288,8 +306,8 @@ export default {
         } catch (_) {}
       }
 
-      try {
-        const resp = await fetch(target, {
+      const fetchImage = async (imgUrl) => {
+        return await fetch(imgUrl, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           },
@@ -298,11 +316,29 @@ export default {
             cacheTtl: 2592000,
           },
         });
+      };
 
-        if (!resp.ok) {
-          return new Response('Error loading image', { status: resp.status });
+      let resp = null;
+      try {
+        resp = await fetchImage(target);
+        if (!resp.ok && fallback) {
+          const fallbackResp = await fetchImage(fallback);
+          if (fallbackResp.ok) {
+            resp = fallbackResp;
+          }
         }
+      } catch (_) {
+        if (fallback) {
+          try {
+            const fallbackResp = await fetchImage(fallback);
+            if (fallbackResp.ok) {
+              resp = fallbackResp;
+            }
+          } catch (_) {}
+        }
+      }
 
+      if (resp && resp.ok) {
         const contentType = resp.headers.get('content-type') || 'image/jpeg';
         const imageResponse = new Response(resp.body, {
           status: 200,
@@ -326,9 +362,17 @@ export default {
         }
 
         return imageResponse;
-      } catch (e) {
-        return new Response('Error loading image', { status: 502 });
       }
+
+      // If image failed, return SVG placeholder with 200 OK so Stremio client never shows broken image
+      return new Response(SVG_THUMBNAIL_PLACEHOLDER, {
+        status: 200,
+        headers: {
+          'content-type': 'image/svg+xml',
+          'access-control-allow-origin': '*',
+          'cache-control': 'public, max-age=86400',
+        },
+      });
     }
 
     const metaRequest = parseMetaRequest(pathname);
