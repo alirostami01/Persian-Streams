@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.9.0',
+  version: '1.9.1',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -368,28 +368,6 @@ async function getMeta(type, id, proxyBaseUrl = '') {
     }
 
     const meta = { ...cinemetaData.meta };
-    const fallbackImage = meta.background || meta.poster || '';
-
-    // Route only episode thumbnails through our caching proxy so they load reliably in Iran
-    if (Array.isArray(meta.videos)) {
-      meta.videos = meta.videos.map(video => {
-        if (!video) return video;
-        const videoCopy = { ...video };
-        let thumb = videoCopy.thumbnail;
-        if (!thumb && imdbId.startsWith('tt') && videoCopy.season && videoCopy.episode) {
-          // Metahub standard URL for episode thumbnails
-          thumb = `https://episodes.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w780.jpg`;
-        }
-        if (thumb) {
-          // Fix legacy invalid domain if present
-          thumb = String(thumb).replace('episodes.images.metahub.space', 'episodes.metahub.space');
-          videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl, fallbackImage);
-        } else if (fallbackImage) {
-          videoCopy.thumbnail = proxyImageUrl(fallbackImage, effectiveBaseUrl);
-        }
-        return videoCopy;
-      });
-    }
 
     // Cache the transformed metadata
     if (metaCache.size >= MAX_META_CACHE_SIZE) {
