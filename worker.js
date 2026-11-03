@@ -43,6 +43,283 @@ const SVG_THUMBNAIL_PLACEHOLDER = `<svg xmlns="http://www.w3.org/2000/svg" width
   <path d="M382 201L404 219L382 237V201Z" fill="#a0a0b6"/>
 </svg>`;
 
+// Controlled Cloudflare Image Resizing settings for episode thumbnails.
+// Parameters are strictly controlled by the worker to prevent arbitrary resource consumption.
+const THUMB_RESIZE_OPTIONS = {
+  width: 320,
+  fit: 'scale-down',
+  format: 'jpeg',
+  quality: 40,
+};
+
+function isPrivateOrLocalHost(hostname) {
+  if (!hostname || typeof hostname !== 'string') return true;
+  const host = hostname.toLowerCase().trim();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal')
+  ) {
+    return true;
+  }
+
+  // IPv4 Private & Link-local ranges:
+  // 10.0.0.0/8
+  // 127.0.0.0/8
+  // 169.254.0.0/16
+  // 172.16.0.0/12
+  // 192.168.0.0/16
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const o1 = parseInt(ipv4Match[1], 10);
+    const o2 = parseInt(ipv4Match[2], 10);
+    const o3 = parseInt(ipv4Match[3], 10);
+    const o4 = parseInt(ipv4Match[4], 10);
+
+    if (o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255) return true;
+    if (o1 === 0 || o1 === 10 || o1 === 127) return true;
+    if (o1 === 169 && o2 === 254) return true;
+    if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;
+    if (o1 === 192 && o2 === 168) return true;
+    if (o1 >= 224) return true;
+  }
+
+  return false;
+}
+
+function isAllowedInitialUrl(urlStr, currentOrigin) {
+  if (!urlStr || typeof urlStr !== 'string') return false;
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (isPrivateOrLocalHost(host)) {
+      return false;
+    }
+
+    // Prevent fetch loop with worker's own origin
+    if (currentOrigin) {
+      try {
+        const workerOrigin = new URL(currentOrigin);
+        if (host === workerOrigin.hostname.toLowerCase()) {
+          return false;
+        }
+      } catch (_) {}
+    }
+    if (host === 'stremio.alirostami.com') {
+      return false;
+    }
+    if (parsed.pathname.includes('/streams/thumb') || parsed.pathname.includes('/thumb')) {
+      return false;
+    }
+
+    // Initial URLs must strictly belong to trusted Metahub domains
+    const isMetahub = host === 'metahub.space' || host.endsWith('.metahub.space');
+    return isMetahub;
+  } catch (_) {
+    return false;
+  }
+}
+
+function isAllowedRedirectUrl(urlStr, currentOrigin) {
+  if (!urlStr || typeof urlStr !== 'string') return false;
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (isPrivateOrLocalHost(host)) {
+      return false;
+    }
+
+    if (currentOrigin) {
+      try {
+        const workerOrigin = new URL(currentOrigin);
+        if (host === workerOrigin.hostname.toLowerCase()) {
+          return false;
+        }
+      } catch (_) {}
+    }
+    if (host === 'stremio.alirostami.com') {
+      return false;
+    }
+    if (parsed.pathname.includes('/streams/thumb') || parsed.pathname.includes('/thumb')) {
+      return false;
+    }
+
+    // Allowed upstream redirect destinations for metadata images
+    const isMetahub = host === 'metahub.space' || host.endsWith('.metahub.space');
+    const isTmdb = host === 'image.tmdb.org' || host.endsWith('.tmdb.org');
+    const isAmazonCdn =
+      host === 'm.media-amazon.com' ||
+      host === 'ia.media-imdb.com' ||
+      host.endsWith('.media-amazon.com') ||
+      host.endsWith('.ssl-images-amazon.com');
+
+    return isMetahub || isTmdb || isAmazonCdn;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Safely resolves upstream HTTP redirects (e.g., episodes.metahub.space -> image.tmdb.org)
+ * validating each hop to prevent SSRF and redirect loops before requesting image resizing.
+ */
+async function resolveFinalImageUrl(initialUrl, currentOrigin, maxRedirects = 3) {
+  let currentUrl = initialUrl;
+  let redirectsCount = 0;
+
+  while (redirectsCount < maxRedirects) {
+    let headResp = null;
+    try {
+      headResp = await fetch(currentUrl, {
+        method: 'GET',
+        redirect: 'manual',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
+        cf: {
+          cacheEverything: true,
+          cacheTtl: 2592000,
+        },
+      });
+    } catch (_) {
+      break;
+    }
+
+    if (headResp && [301, 302, 307, 308].includes(headResp.status)) {
+      const location = headResp.headers.get('location');
+      if (!location) break;
+
+      let nextUrl;
+      try {
+        nextUrl = new URL(location, currentUrl).toString();
+      } catch (_) {
+        break;
+      }
+
+      if (!isAllowedRedirectUrl(nextUrl, currentOrigin)) {
+        debugLog('THUMB', 'Blocked unsafe redirect destination', { from: currentUrl, to: nextUrl });
+        return null;
+      }
+
+      currentUrl = nextUrl;
+      redirectsCount++;
+    } else {
+      break;
+    }
+  }
+
+  return currentUrl;
+}
+
+/**
+ * Fetches and compresses the image using Cloudflare Image Resizing (cf.image),
+ * gracefully falling back to raw fetch if resizing is unsupported or fails.
+ */
+async function fetchOptimizedImage(targetUrl, currentOrigin) {
+  const startTime = Date.now();
+  const resolvedUrl = await resolveFinalImageUrl(targetUrl, currentOrigin);
+  if (!resolvedUrl) {
+    return { ok: false, status: 400, reason: 'Disallowed or invalid redirect target' };
+  }
+
+  // Attempt 1: Fetch with cf.image transformations
+  try {
+    const resizedResp = await fetch(resolvedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      },
+      cf: {
+        image: THUMB_RESIZE_OPTIONS,
+        cacheEverything: true,
+        cacheTtl: 2592000,
+      },
+    });
+
+    const contentType = resizedResp.headers.get('content-type') || '';
+    const cfResized = resizedResp.headers.get('cf-resized');
+
+    if (resizedResp.ok && contentType.startsWith('image/')) {
+      const imageBuffer = await resizedResp.arrayBuffer();
+      const durationMs = Date.now() - startTime;
+      return {
+        ok: true,
+        status: 200,
+        buffer: imageBuffer,
+        contentType: contentType,
+        bytes: imageBuffer.byteLength,
+        resized: !!cfResized || contentType.includes('jpeg'),
+        cfResizedHeader: cfResized || 'none',
+        durationMs,
+        resolvedUrl,
+      };
+    }
+
+    debugLog('THUMB', 'cf.image fetch non-ok, falling back to passthrough', {
+      status: resizedResp.status,
+      cfResized,
+      contentType,
+    });
+  } catch (err) {
+    debugLog('THUMB', 'cf.image fetch error, falling back to passthrough', { error: err.message });
+  }
+
+  // Attempt 2: Fallback to direct raw image fetch if cf.image failed or is unavailable
+  try {
+    const rawResp = await fetch(resolvedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      },
+      cf: {
+        cacheEverything: true,
+        cacheTtl: 2592000,
+      },
+    });
+
+    const contentType = rawResp.headers.get('content-type') || '';
+    if (rawResp.ok && contentType.startsWith('image/')) {
+      const rawBuffer = await rawResp.arrayBuffer();
+      const durationMs = Date.now() - startTime;
+      return {
+        ok: true,
+        status: 200,
+        buffer: rawBuffer,
+        contentType: contentType,
+        bytes: rawBuffer.byteLength,
+        resized: false,
+        cfResizedHeader: 'passthrough',
+        durationMs,
+        resolvedUrl,
+      };
+    }
+
+    return {
+      ok: false,
+      status: rawResp.status,
+      contentType,
+      reason: 'Upstream returned non-image or error status',
+      durationMs: Date.now() - startTime,
+    };
+  } catch (rawErr) {
+    return {
+      ok: false,
+      status: 502,
+      reason: rawErr.message,
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
 function withAbsoluteLogo(request) {
   const url = new URL(request.url);
   return {
@@ -279,10 +556,21 @@ export default {
 
       let fallback = url.searchParams.get('fallback');
 
-      // Fix legacy invalid episode thumbnail domain
+      // Normalize legacy episode thumbnail domains
       target = target.replace('episodes.images.metahub.space', 'episodes.metahub.space');
       if (fallback) {
         fallback = fallback.replace('episodes.images.metahub.space', 'episodes.metahub.space');
+      }
+
+      // Security check: validate input URL to prevent open proxy and SSRF
+      if (!isAllowedInitialUrl(target, url.origin)) {
+        debugLog('THUMB', 'Blocked disallowed target URL', { target });
+        return new Response('Forbidden: disallowed image domain or destination', { status: 403 });
+      }
+
+      if (fallback && !isAllowedInitialUrl(fallback, url.origin)) {
+        debugLog('THUMB', 'Ignored disallowed fallback URL', { fallback });
+        fallback = null;
       }
 
       // Generate ETag for conditional requests and client caching
@@ -317,49 +605,54 @@ export default {
         } catch (_) {}
       }
 
-      const fetchImage = async (imgUrl) => {
-        return await fetch(imgUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          },
-          cf: {
-            cacheEverything: true,
-            cacheTtl: 2592000,
-          },
-        });
-      };
-
-      let resp = null;
+      // Attempt to fetch and optimize primary image
+      let primaryResult = null;
       try {
-        resp = await fetchImage(target);
-        if (!resp.ok && fallback) {
-          const fallbackResp = await fetchImage(fallback);
-          if (fallbackResp.ok) {
-            resp = fallbackResp;
+        primaryResult = await fetchOptimizedImage(target, url.origin);
+      } catch (err) {
+        debugLog('THUMB', 'primary image fetch exception', { error: err.message });
+      }
+
+      let chosenResult = null;
+      let usedSource = 'none';
+
+      if (primaryResult && primaryResult.ok) {
+        chosenResult = primaryResult;
+        usedSource = 'primary';
+      } else if (fallback) {
+        // Fallback image optimization
+        try {
+          const fallbackResult = await fetchOptimizedImage(fallback, url.origin);
+          if (fallbackResult && fallbackResult.ok) {
+            chosenResult = fallbackResult;
+            usedSource = 'fallback';
           }
-        }
-      } catch (_) {
-        if (fallback) {
-          try {
-            const fallbackResp = await fetchImage(fallback);
-            if (fallbackResp.ok) {
-              resp = fallbackResp;
-            }
-          } catch (_) {}
+        } catch (fbErr) {
+          debugLog('THUMB', 'fallback image fetch exception', { error: fbErr.message });
         }
       }
 
-      if (resp && resp.ok) {
-        const contentType = resp.headers.get('content-type') || 'image/jpeg';
-        const imageResponse = new Response(resp.body, {
+      if (chosenResult && chosenResult.ok) {
+        const imageResponse = new Response(chosenResult.buffer, {
           status: 200,
           headers: {
-            'content-type': contentType,
+            'content-type': chosenResult.contentType,
             'access-control-allow-origin': '*',
             'access-control-allow-methods': 'GET, HEAD, OPTIONS',
             'cache-control': 'public, max-age=31536000, immutable',
             'etag': etag,
+            'x-thumbnail-source': usedSource,
           },
+        });
+
+        debugLog('THUMB', 'thumbnail delivered successfully', {
+          source: usedSource,
+          status: chosenResult.status,
+          contentType: chosenResult.contentType,
+          bytes: chosenResult.bytes,
+          resized: chosenResult.resized,
+          cfResized: chosenResult.cfResizedHeader,
+          durationMs: chosenResult.durationMs,
         });
 
         if (cache) {
@@ -375,13 +668,20 @@ export default {
         return imageResponse;
       }
 
+      debugLog('THUMB', 'thumbnail sources failed, serving SVG placeholder', {
+        target,
+        fallback,
+        primaryReason: primaryResult ? primaryResult.reason : 'unknown',
+      });
+
       // If image failed, return SVG placeholder with 200 OK so Stremio client never shows broken image
       return new Response(SVG_THUMBNAIL_PLACEHOLDER, {
         status: 200,
         headers: {
           'content-type': 'image/svg+xml',
           'access-control-allow-origin': '*',
-          'cache-control': 'public, max-age=86400',
+          'cache-control': 'public, max-age=3600',
+          'x-thumbnail-source': 'placeholder',
         },
       });
     }
