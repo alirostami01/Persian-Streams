@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.8.0',
+  version: '1.8.1',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -314,16 +314,14 @@ async function fetchImdbPoster(imdbId) {
 }
 
 /**
- * Fetch and transform metadata (movies & series) from Cinemeta,
- * rewriting episode thumbnails to our proxy for reliable loading in Iran.
+ * Fetch and transform metadata (movies & series) from Cinemeta using default Stremio formats.
  */
 async function getMeta(type, id, proxyBaseUrl = '') {
   if (!id || typeof id !== 'string') return { meta: null };
   const imdbId = id.split(':')[0];
   if (!imdbId.startsWith('tt')) return { meta: null };
 
-  const effectiveBaseUrl = (proxyBaseUrl || PUBLIC_URL || 'https://stremio.alirostami.com').replace(/\/$/, '');
-  const cacheKey = `${type}:${imdbId}:${effectiveBaseUrl}`;
+  const cacheKey = `${type}:${imdbId}`;
   const now = Date.now();
 
   const cached = metaCache.get(cacheKey);
@@ -370,51 +368,16 @@ async function getMeta(type, id, proxyBaseUrl = '') {
 
     const meta = { ...cinemetaData.meta };
 
-    // Enhance poster with official high-res IMDb poster if available
-    try {
-      const imdbPoster = await fetchImdbPoster(imdbId);
-      if (imdbPoster) {
-        meta.poster = imdbPoster;
-      }
-    } catch (_) {}
-
-    const fallbackImage = meta.background || meta.poster || '';
-
-    // Rewrite episode thumbnails to proxy through our addon so they load and cache in Iran
+    // Standard default episode thumbnails if missing from Cinemeta
     if (Array.isArray(meta.videos)) {
       meta.videos = meta.videos.map(video => {
         if (!video) return video;
         const videoCopy = { ...video };
-        let thumb = videoCopy.thumbnail;
-        if (!thumb && imdbId.startsWith('tt') && videoCopy.season && videoCopy.episode) {
-          // Metahub standard URL for episode thumbnails (redirects to TMDB)
-          thumb = `https://episodes.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w780.jpg`;
-        }
-        if (thumb) {
-          // Fix legacy invalid domain if present
-          thumb = String(thumb).replace('episodes.images.metahub.space', 'episodes.metahub.space');
-          videoCopy.thumbnail = proxyImageUrl(thumb, effectiveBaseUrl, fallbackImage);
-        } else if (fallbackImage) {
-          // Graceful fallback to background or poster if no thumbnail is available
-          videoCopy.thumbnail = proxyImageUrl(fallbackImage, effectiveBaseUrl);
+        if (!videoCopy.thumbnail && imdbId.startsWith('tt') && videoCopy.season && videoCopy.episode) {
+          videoCopy.thumbnail = `https://episodes.metahub.space/${imdbId}/${videoCopy.season}/${videoCopy.episode}/w780.jpg`;
         }
         return videoCopy;
       });
-    }
-
-    // Proxy poster, background, and logo so they reliably load without VPN in Iran
-    if (meta.poster && typeof meta.poster === 'string') {
-      meta.poster = proxyImageUrl(meta.poster, effectiveBaseUrl);
-    }
-
-    // Proxy background so it reliably loads without VPN in Iran
-    if (meta.background && typeof meta.background === 'string') {
-      meta.background = proxyImageUrl(meta.background, effectiveBaseUrl);
-    }
-
-    // Proxy logo if present
-    if (meta.logo && typeof meta.logo === 'string') {
-      meta.logo = proxyImageUrl(meta.logo, effectiveBaseUrl);
     }
 
     // Cache the transformed metadata
@@ -1681,15 +1644,10 @@ function toCatalogMeta(item, expectedType) {
   const title = cleanText(rawTitle) || cleanText(rawTitleFa);
   if (!title) return null;
 
-  // Stremio poster proxied through our addon to load reliably without VPN in Iran
+  // Stremio default poster
   let poster = undefined;
   if (imdbId && String(imdbId).startsWith('tt')) {
-    const cachedImdb = imdbPosterCache.get(imdbId);
-    if (cachedImdb && cachedImdb.url) {
-      poster = cachedImdb.url;
-    } else {
-      poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
-    }
+    poster = `https://images.metahub.space/poster/medium/${imdbId}/img.jpg`;
   } else if (item.image) {
     const rawImage = String(item.image).trim();
     if (rawImage.startsWith('http://') || rawImage.startsWith('https://')) {
@@ -1697,10 +1655,6 @@ function toCatalogMeta(item, expectedType) {
     } else {
       poster = `${BASE_URL.replace(/\/$/, '')}${rawImage.startsWith('/') ? '' : '/'}${rawImage}`;
     }
-  }
-
-  if (poster) {
-    poster = proxyImageUrl(poster);
   }
 
   const persianTitle = cleanText(rawTitleFa);

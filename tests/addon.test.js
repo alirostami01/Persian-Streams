@@ -67,7 +67,7 @@ describe('Catalog Meta Transformer', () => {
     assert.strictEqual(meta.id, 'tt1234567');
     assert.strictEqual(
       meta.poster,
-      'https://stremio.alirostami.com/streams/thumb?url=https%3A%2F%2Fimages.metahub.space%2Fposter%2Fmedium%2Ftt1234567%2Fimg.jpg'
+      'https://images.metahub.space/poster/medium/tt1234567/img.jpg'
     );
     assert.ok(meta.description.includes('🎙️ دوبله فارسی'));
     assert.ok(meta.description.includes('⭐ امتیاز: 8.5/10'));
