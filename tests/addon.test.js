@@ -190,3 +190,88 @@ describe('IMDb Features', () => {
   });
 });
 
+describe('Multi-Level Caching System', () => {
+  test('streamCache stores and retrieves streams with appropriate TTL', async () => {
+    const testKey = 'series:tt_test_123:1:1';
+    const sampleStreams = [
+      { name: '1080p', title: 'Episode 1', url: 'https://cdn.example.com/s01e01.mkv' }
+    ];
+
+    addon.streamCache.set(testKey, {
+      timestamp: Date.now(),
+      ttl: 6 * 60 * 60 * 1000,
+      streams: sampleStreams
+    });
+
+    const res = await addon.getStreamsWithCache('series', 'tt_test_123', 1, 1);
+    assert.ok(res);
+    assert.deepStrictEqual(res.streams, sampleStreams);
+    assert.ok(res.cacheMaxAge > 0 && res.cacheMaxAge <= 21600);
+    assert.strictEqual(res.staleRevalidate, 86400 * 2);
+
+    addon.streamCache.delete(testKey);
+  });
+
+  test('cinemetaCache stores and returns cached titles without network lookup', async () => {
+    const testKey = 'series:tt_cinemeta_test';
+    addon.cinemetaCache.set(testKey, {
+      timestamp: Date.now(),
+      meta: { name: 'Test Series Cached', year: '2024-' }
+    });
+
+    const meta = await addon.fetchTitleFromMeta('series', 'tt_cinemeta_test');
+    assert.ok(meta);
+    assert.strictEqual(meta.name, 'Test Series Cached');
+    assert.strictEqual(meta.year, '2024-');
+
+    addon.cinemetaCache.delete(testKey);
+  });
+
+  test('contentUrlCache stores and retrieves content page URLs', async () => {
+    const testKey = 'series:tt_content_test';
+    addon.contentUrlCache.set(testKey, {
+      timestamp: Date.now(),
+      url: 'https://film2media.example/series/test-show/'
+    });
+
+    const resolved = await addon.resolveViaQuickSearch('tt_content_test', 'Test Show', 2024, 'series');
+    assert.strictEqual(resolved, 'https://film2media.example/series/test-show/');
+
+    addon.contentUrlCache.delete(testKey);
+  });
+
+  test('pageHtmlCache returns cached cheerio instance without re-fetching', async () => {
+    const testUrl = 'https://film2media.example/series/test-show/';
+    const testHtml = '<html><body><div class="download-season"><button data-bs-toggle="collapse">فصل اول</button></div></body></html>';
+
+    addon.pageHtmlCache.set(testUrl, {
+      timestamp: Date.now(),
+      html: testHtml
+    });
+
+    const $ = await addon.fetchPage(testUrl);
+    assert.ok($);
+    assert.strictEqual($('button').text(), 'فصل اول');
+
+    addon.pageHtmlCache.delete(testUrl);
+  });
+
+  test('addon router handler returns cacheMaxAge and staleRevalidate headers', async () => {
+    const testKey = 'series:tt_handler_test:1:1';
+    addon.streamCache.set(testKey, {
+      timestamp: Date.now(),
+      ttl: 6 * 60 * 60 * 1000,
+      streams: [{ name: 'Test', title: 'Test', url: 'https://test.com/v.mp4' }]
+    });
+
+    const res = await addon.get('stream', 'series', 'tt_handler_test:1:1');
+    assert.ok(res);
+    assert.ok(Array.isArray(res.streams));
+    assert.strictEqual(res.streams.length, 1);
+    assert.ok(res.cacheMaxAge > 0 && res.cacheMaxAge <= 21600);
+    assert.ok(res.staleRevalidate >= 86400);
+
+    addon.streamCache.delete(testKey);
+  });
+});
+

@@ -116,7 +116,7 @@ const manifest = {
   id: 'org.alirostami.streams.persian',
   name: 'Persian Streams',
   description: 'Fast streaming links from Iranian media providers with Persian subtitles and audio.\n\nAuthor: Ali Rostami  \nWebsite: alirostami.com/support \nGitHub: https://github.com/alirostami01/Persian-Streams/',
-  version: '1.7.5',
+  version: '1.8.0',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -147,10 +147,22 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
+// In-memory cache for Cinemeta titles to eliminate duplicate network lookups
+const cinemetaCache = new Map();
+const CINEMETA_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days (titles and release years don't change)
+const MAX_CINEMETA_CACHE_SIZE = 2000;
+
 /**
  * Fetch metadata title from Stremio's meta endpoint using IMDB ID
  */
 async function fetchTitleFromMeta(type, imdbId) {
+  if (!imdbId || typeof imdbId !== 'string') return null;
+  const cacheKey = `${type}:${imdbId}`;
+  const cached = cinemetaCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < CINEMETA_CACHE_TTL)) {
+    return cached.meta;
+  }
+
   try {
     // Stremio meta endpoint format: https://v3-cinemeta.strem.io/meta/<type>/<imdbId>.json
     const metaUrl = `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`;
@@ -162,10 +174,16 @@ async function fetchTitleFromMeta(type, imdbId) {
     });
 
     if (response.data && response.data.meta && response.data.meta.name) {
-      return {
+      const result = {
         name: response.data.meta.name,
         year: response.data.meta.year || null
       };
+      if (cinemetaCache.size >= MAX_CINEMETA_CACHE_SIZE) {
+        const oldestKey = cinemetaCache.keys().next().value;
+        cinemetaCache.delete(oldestKey);
+      }
+      cinemetaCache.set(cacheKey, { timestamp: Date.now(), meta: result });
+      return result;
     }
     return null;
   } catch (error) {
@@ -229,6 +247,23 @@ const MAX_META_CACHE_SIZE = 200;
 const imdbPosterCache = new Map();
 const IMDB_POSTER_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_IMDB_POSTER_CACHE_SIZE = 1000;
+
+// In-memory cache for resolved content URLs (IMDb -> site URL)
+const contentUrlCache = new Map();
+const CONTENT_URL_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_CONTENT_URL_CACHE_SIZE = 2000;
+
+// In-memory cache for raw page HTML (especially series pages with all seasons/episodes)
+const pageHtmlCache = new Map();
+const PAGE_HTML_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
+const MAX_PAGE_HTML_CACHE_SIZE = 100;
+
+// In-memory cache for final stream results
+const streamCache = new Map();
+const STREAM_CACHE_TTL_FRESH = 6 * 60 * 60 * 1000; // 6 hours for fresh/ongoing series episodes
+const STREAM_CACHE_TTL_DEFAULT = 24 * 60 * 60 * 1000; // 24 hours for older completed series & movies
+const STREAM_CACHE_TTL_EMPTY = 5 * 60 * 1000; // 5 minutes for empty results (negative cache)
+const MAX_STREAM_CACHE_SIZE = 1500;
 
 /**
  * Fetch official high-res poster from IMDb suggestion API (m.media-amazon.com)
@@ -418,6 +453,14 @@ async function getMeta(type, id, proxyBaseUrl = '') {
 async function resolveViaQuickSearch(imdbId, title = null, year = null, expectedType = null) {
   const normalizeImdb = value => String(value ?? '').trim().toLowerCase();
   const requestedImdb = normalizeImdb(imdbId);
+  if (!requestedImdb) return null;
+
+  const contentUrlCacheKey = `${expectedType || 'any'}:${requestedImdb}`;
+  const cachedContentUrl = contentUrlCache.get(contentUrlCacheKey);
+  if (cachedContentUrl && (Date.now() - cachedContentUrl.timestamp < CONTENT_URL_CACHE_TTL)) {
+    debugLog('QUICK_SEARCH', `Cache hit for ${contentUrlCacheKey}: ${sanitizeUrlForLog(cachedContentUrl.url)}`);
+    return cachedContentUrl.url;
+  }
 
   const isTypeMatch = item => {
     if (!item) return false;
@@ -529,6 +572,12 @@ async function resolveViaQuickSearch(imdbId, title = null, year = null, expected
         debugLog('QUICK_SEARCH', `resolved to /profile/ (not found)`, { mode });
         continue;
       }
+
+      if (contentUrlCache.size >= MAX_CONTENT_URL_CACHE_SIZE) {
+        const oldestKey = contentUrlCache.keys().next().value;
+        contentUrlCache.delete(oldestKey);
+      }
+      contentUrlCache.set(contentUrlCacheKey, { timestamp: Date.now(), url: contentUrl });
 
       return contentUrl;
     } catch (error) {
@@ -658,6 +707,13 @@ async function fetchPage(url) {
     debugLog('FETCH', `url is null/empty, cannot fetch`);
     return null;
   }
+
+  const cachedPage = pageHtmlCache.get(url);
+  if (cachedPage && (Date.now() - cachedPage.timestamp < PAGE_HTML_CACHE_TTL)) {
+    verboseLog('FETCH', `Serving page from cache: ${sanitizeUrlForLog(url)}`);
+    return cheerio.load(cachedPage.html);
+  }
+
   debugLog('FETCH', `url=${sanitizeUrlForLog(url)}`);
   try {
     const { html, status, finalUrl, contentType } = await fetchHtmlContent(url);
@@ -702,6 +758,14 @@ async function fetchPage(url) {
     const commentsIndex = cleanedBody.search(/<(?:div|section)\b[^>]*(?:id|class)=["'][^"']*(?:comment|نظر)[^"']*["']/i);
     if (commentsIndex !== -1 && commentsIndex > 5000) {
       cleanedBody = cleanedBody.slice(0, commentsIndex) + '</body></html>';
+    }
+
+    if (cleanedBody && cleanedBody.length >= 100) {
+      if (pageHtmlCache.size >= MAX_PAGE_HTML_CACHE_SIZE) {
+        const oldestKey = pageHtmlCache.keys().next().value;
+        pageHtmlCache.delete(oldestKey);
+      }
+      pageHtmlCache.set(url, { timestamp: Date.now(), html: cleanedBody });
     }
 
     verboseLog('FETCH', `load cheerio`, { body_preview: cleanedBody.slice(0, 300).replace(/\n/g, ' ') });
@@ -1387,10 +1451,52 @@ function extractMovieStreams($) {
   return streams;
 }
 
+function isFreshContent(type, year, season = null) {
+  const currentYear = new Date().getFullYear();
+
+  if (type === 'series') {
+    // 1. Ongoing series format (e.g. "2024-", "2025-", "2026-")
+    if (typeof year === 'string' && year.includes('-')) {
+      const parts = year.split('-');
+      if (!parts[1] || !parts[1].trim()) return true; // Ongoing
+      const endYear = parseInt(parts[1], 10);
+      if (endYear && endYear >= currentYear - 1) return true;
+      if (endYear && endYear < currentYear - 1) return false;
+    }
+
+    const seriesYear = parseInt(year, 10);
+    if (seriesYear) {
+      if (seriesYear >= currentYear - 1) return true;
+      if (seriesYear < currentYear - 2) return false;
+    }
+
+    return true;
+  }
+
+  // For movies:
+  const movieYear = parseInt(year, 10);
+  if (movieYear && movieYear >= currentYear - 1) return true;
+  return false;
+}
+
 /**
- * Main stream handler - get streams for a given content
+ * Main stream handler with multi-level caching
  */
-async function getStreams(type, imdbId, season = null, episode = null) {
+async function getStreamsWithCache(type, imdbId, season = null, episode = null) {
+  const streamCacheKey = `${type}:${imdbId}:${season ?? 0}:${episode ?? 0}`;
+  const now = Date.now();
+  const cached = streamCache.get(streamCacheKey);
+
+  if (cached && (now - cached.timestamp < cached.ttl)) {
+    const remainingSeconds = Math.max(1, Math.floor((cached.ttl - (now - cached.timestamp)) / 1000));
+    debugLog('STREAM', `Cache hit for ${streamCacheKey} (remaining=${remainingSeconds}s)`);
+    return {
+      streams: cached.streams,
+      cacheMaxAge: remainingSeconds,
+      staleRevalidate: 86400 * 2
+    };
+  }
+
   debugLog('STREAM', `Request type=${type} imdb=${imdbId} season=${season} episode=${episode}`);
   // Temporarily disabled trailer stream
   const ENABLE_TRAILER_STREAM = false;
@@ -1416,7 +1522,17 @@ async function getStreams(type, imdbId, season = null, episode = null) {
 
   if (!contentUrl) {
     debugLog('STREAM', `Failed to resolve content URL for ${imdbId}`);
-    return trailerStream ? [trailerStream] : [];
+    const emptyResult = trailerStream ? [trailerStream] : [];
+    streamCache.set(streamCacheKey, {
+      timestamp: now,
+      ttl: STREAM_CACHE_TTL_EMPTY,
+      streams: emptyResult
+    });
+    return {
+      streams: emptyResult,
+      cacheMaxAge: 300,
+      staleRevalidate: 600
+    };
   }
 
   debugLog('STREAM', `contentUrl resolved: ${sanitizeUrlForLog(contentUrl)}`);
@@ -1426,12 +1542,14 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     $ = await fetchPage(contentUrl);
   } catch (e) {
     debugLog('STREAM', `fetchPage threw`, { error: e.message });
-    return trailerStream ? [trailerStream] : [];
+    const emptyResult = trailerStream ? [trailerStream] : [];
+    return { streams: emptyResult, cacheMaxAge: 300, staleRevalidate: 600 };
   }
 
   if (!$) {
     debugLog('STREAM', `Failed to fetch content page: ${sanitizeUrlForLog(contentUrl)}`);
-    return trailerStream ? [trailerStream] : [];
+    const emptyResult = trailerStream ? [trailerStream] : [];
+    return { streams: emptyResult, cacheMaxAge: 300, staleRevalidate: 600 };
   }
 
   let streams = [];
@@ -1446,7 +1564,8 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     }
   } catch (e) {
     debugLog('STREAM', `parser threw`, { error: e.message, stack: e.stack && e.stack.slice(0, 800) });
-    return trailerStream ? [trailerStream] : [];
+    const emptyResult = trailerStream ? [trailerStream] : [];
+    return { streams: emptyResult, cacheMaxAge: 300, staleRevalidate: 600 };
   }
 
   debugLog('STREAM', `Found ${streams.length} stream(s) for ${imdbId}`);
@@ -1476,22 +1595,55 @@ async function getStreams(type, imdbId, season = null, episode = null) {
     });
   }
 
+  let finalStreams = validStreams;
   if (validStreams.length > 0) {
     const donationStream = {
       name: '💖 Persian Streams',
       title: '⚡ جهت نگهداری و بهبود پروژه لطفا دونیت کنید\n🔗 کلیک کنید: alirostami.com/support',
       externalUrl: 'https://alirostami.com/support'
     };
-    return trailerStream
+    finalStreams = trailerStream
       ? [donationStream, trailerStream, ...validStreams]
       : [donationStream, ...validStreams];
+  } else if (trailerStream) {
+    finalStreams = [trailerStream];
   }
 
-  if (trailerStream) {
-    return [trailerStream];
+  // Determine TTL based on freshness
+  let ttl = STREAM_CACHE_TTL_DEFAULT;
+  let cacheMaxAge = Math.floor(STREAM_CACHE_TTL_DEFAULT / 1000); // 24 hours
+
+  if (finalStreams.length === 0) {
+    ttl = STREAM_CACHE_TTL_EMPTY;
+    cacheMaxAge = 300; // 5 minutes for empty
+  } else if (isFreshContent(type, year, season)) {
+    ttl = STREAM_CACHE_TTL_FRESH; // 6 hours for fresh/ongoing episodes
+    cacheMaxAge = Math.floor(STREAM_CACHE_TTL_FRESH / 1000); // 21600 seconds
   }
 
-  return validStreams;
+  if (streamCache.size >= MAX_STREAM_CACHE_SIZE) {
+    const oldestKey = streamCache.keys().next().value;
+    streamCache.delete(oldestKey);
+  }
+  streamCache.set(streamCacheKey, {
+    timestamp: now,
+    ttl,
+    streams: finalStreams
+  });
+
+  return {
+    streams: finalStreams,
+    cacheMaxAge,
+    staleRevalidate: 86400 * 2
+  };
+}
+
+/**
+ * Backward-compatible stream handler returning array of streams
+ */
+async function getStreams(type, imdbId, season = null, episode = null) {
+  const result = await getStreamsWithCache(type, imdbId, season, episode);
+  return result.streams;
 }
 
 // ---- Catalog Support --------------------------------------------------------
@@ -1719,8 +1871,12 @@ builder.defineStreamHandler(async (args) => {
     debugLog('HANDLER', `Movie request: ${imdbId}`);
   }
 
-  const streams = await getStreams(type, imdbId, season, episode);
-  return { streams: streams || [] };
+  const result = await getStreamsWithCache(type, imdbId, season, episode);
+  return {
+    streams: result.streams || [],
+    cacheMaxAge: result.cacheMaxAge || 21600,
+    staleRevalidate: result.staleRevalidate || 86400 * 2
+  };
 });
 
 const addonInterface = builder.getInterface();
@@ -1730,6 +1886,7 @@ module.exports = {
   get: addonInterface.get.bind(addonInterface),
   getInterface: () => addonInterface,
   getStreams,
+  getStreamsWithCache,
   getMeta,
   proxyImageUrl,
   setPublicUrl,
@@ -1747,5 +1904,9 @@ module.exports = {
   extractSeasonNumber,
   cleanText,
   decodeHtmlEntities,
-  fetchImdbPoster
+  fetchImdbPoster,
+  streamCache,
+  contentUrlCache,
+  pageHtmlCache,
+  cinemetaCache
 };

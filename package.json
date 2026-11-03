@@ -1,6 +1,6 @@
 {
   "name": "Persian-Streams",
-  "version": "1.7.5",
+  "version": "1.8.0",
   "description": "Unofficial Stremio addon for streaming content from Film2Media",
   "main": "server.js",
   "scripts": {

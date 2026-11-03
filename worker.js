@@ -4,7 +4,7 @@ import addonModule from './addon.js';
 // CommonJS module into the Worker, so use a normal static import instead of
 // createRequire(import.meta.url), which has no usable file URL in Workers.
 
-const { manifest, get, getStreams, getMeta, setBaseUrl, getBaseUrl, setPublicUrl } = addonModule;
+const { manifest, get, getStreams, getStreamsWithCache, getMeta, setBaseUrl, getBaseUrl, setPublicUrl } = addonModule;
 
 function debugLog(scope, message, data) {
   if (data !== undefined) {
@@ -169,7 +169,13 @@ async function handleStream(streamRequest, requestUrl) {
 
     debugLog('WORKER', `stream request type=${args[0]} id=${args[1]} season=${args[2]} episode=${args[3]} url=${requestUrl}`);
 
-    const streams = deduplicateStreams(await getStreams(...args));
+    const streamResult = typeof getStreamsWithCache === 'function'
+      ? await getStreamsWithCache(...args)
+      : { streams: await getStreams(...args), cacheMaxAge: 21600, staleRevalidate: 86400 };
+
+    const streams = deduplicateStreams(streamResult.streams || []);
+    const maxAge = streamResult.cacheMaxAge || 21600;
+    const sMaxAge = streamResult.staleRevalidate || 86400;
 
     const duration = Date.now() - start;
     debugLog('WORKER', `stream handler complete`, { imdb: args[1], streams: streams ? streams.length : 0, duration_ms: duration });
@@ -177,9 +183,14 @@ async function handleStream(streamRequest, requestUrl) {
     // Ensure we never lose the reason for empty streams - logs already emitted in getStreams/quick-search/fetch
     if (!streams || streams.length === 0) {
       debugLog('WORKER', `returning empty streams`, { imdb: args[1], type: args[0] });
+      return json({ streams: [] }, 200, {
+        'cache-control': 'public, max-age=300, s-maxage=600'
+      });
     }
 
-    return json({ streams: streams || [] });
+    return json({ streams: streams || [] }, 200, {
+      'cache-control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}`
+    });
   } catch (error) {
     console.error('[WORKER] stream handler error:', error.message, { stack: error.stack && error.stack.slice(0, 800) });
     debugLog('WORKER', `returning empty streams due to handler error`, { error: error.message });
